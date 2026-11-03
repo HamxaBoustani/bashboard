@@ -1,28 +1,28 @@
-# 🚀 Bashboard: Enterprise Linux VPS Control Plane & WordPress Orchestrator
+# 🚀 Bashboard: Lightweight Linux VPS Control Plane & Multi-Site Orchestrator
 
-![Version](https://img.shields.io/badge/Version-1.6.2_(Production_Hardened)-blue.svg)
+![Version](https://img.shields.io/badge/Version-1.6.2-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-Ubuntu_22.04%20|%2024.04%20LTS%20|%20Debian_11%20|%2012-lightgrey.svg?logo=linux)
-![Architecture](https://img.shields.io/badge/Architecture-Modular_TUI_%7C_Zero--Daemon-green.svg)
-![Security](https://img.shields.io/badge/Security-POSIX_Sandbox_%7C_sys__temp__dir_%7C_750_Isolation-red.svg)
+![Architecture](https://img.shields.io/badge/Architecture-Modular_Bash_TUI_%7C_Zero--Daemon-green.svg)
+![Security](https://img.shields.io/badge/Security-POSIX_Isolated_%7C_Tenant_Sandboxing-red.svg)
 ![License](https://img.shields.io/badge/License-MIT-orange.svg)
 
-**Bashboard** is a resilient, zero-overhead terminal control plane and systems automation engine engineered strictly in Bash under **Site Reliability Engineering (SRE)** and **DevSecOps** standards. Designed for standalone production Linux VPS instances, Bashboard provisions high-performance LEMP stacks, isolates multi-tenant workloads via unprivileged POSIX users, sandboxes PHP temporary files and sessions away from global `/tmp`, enforces parent-directory isolation that allows native one-click WordPress dashboard updates without FTP prompts, dynamically rebalances PHP-FPM pools to prevent OOM panics, and streams automated non-locking database backups directly to **Google Drive** without running background daemons or web control panels.
+**Bashboard** is a zero-overhead, modular terminal control plane and automation suite written in Bash. Engineered for standalone Linux VPS instances hosting multiple internal projects, agency client sites, or private eCommerce stores, Bashboard provides automated LEMP stack deployment, per-site on-demand PHP-FPM resource isolation, non-locking offsite backups to Google Drive, and automated Nginx virtual host management without running persistent background control panel daemons.
 
 ---
 
-## ⚡ Why Bashboard? (Zero-Daemon Architecture)
+## 📌 Scope & Architectural Philosophy
 
-Traditional server control panels (cPanel, Plesk, aaPanel, CyberPanel) run persistent Node.js, Python, or Go daemons that permanently consume 500MB–1.5GB of RAM and expose additional attack surfaces.
+### What Bashboard Is
+* **A Zero-Daemon CLI/TUI Control Plane:** Bashboard executes purely within an active administrative SSH session. When closed, **zero management processes or control panel daemons remain in RAM**. All available hardware resources are dedicated to Nginx, MariaDB, Redis, and PHP-FPM.
+* **A Blast-Radius Compartmentalizer:** Tailored for developer teams, agencies, and self-hosted server environments. If one WordPress site is compromised via a vulnerable plugin, POSIX permission boundaries and PHP sandboxing prevent lateral movement to neighboring virtual hosts or system credentials.
+* **A Safe Operational Wrapper:** Replaces manual configuration steps with idempotent, rollback-aware Bash scripts that validate configurations (`nginx -t`, `php-fpm -t`) prior to triggering service reloads.
 
-Bashboard operates under a **Zero-Daemon Philosophy**:
-* **0 MB Idle Footprint:** Bashboard runs purely in your active SSH terminal session. Once exited, **zero** management daemons or background processes remain. 100% of server RAM is dedicated to Nginx, MariaDB, and your application workloads.
-* **Kernel-Level Atomic Locking:** Enforces non-blocking `flock` on File Descriptor 200 over `/run/bashboard.lock`. Lock release is guaranteed by the Linux kernel upon process death (even under uncatchable `SIGKILL`), eliminating stale lock directories common to fragile scripts.
-* **Accurate & Non-Forking Telemetry:** Samples `/proc/stat` via an exact 100ms $\Delta t$ Jiffy delta for precise multi-core CPU metrics and parses `/proc/meminfo` via a pure Bash `while read` loop, avoiding process storms and dangerous `eval` injection vectors.
-* **Commercial Multi-Tenant POSIX Model:** Each tenant operates under an isolated unprivileged system user (`v_<id>`). Parent directories are locked down with `750` permissions (`$vhost_user:www-data`), completely eliminating horizontal cross-tenant data leaks while enabling native dashboard-based WordPress updates.
+### What Bashboard Is Not
+* **Not Public Shared Hosting Infrastructure:** Bashboard is not a drop-in replacement for CloudLinux, CageFS, or cPanel when hosting untrusted, hostile third-party users. It relies on standard Linux POSIX permissions and PHP-FPM pool isolation rather than kernel-level cgroups v2 resource virtualization or namespace chroot jails.
 
 ---
 
-## 🏗️ Multi-Tenant Infrastructure Topology
+## 🏗️ System Architecture Topology
 
 ```text
                                 [ Public Internet ]
@@ -39,7 +39,7 @@ Bashboard operates under a **Zero-Daemon Philosophy**:
       [ VHost: site-a.com ]    [ VHost: site-b.com ]    [ VHost: uploads.site-a ]
          (User: v_site_a)         (User: v_site_b)       (Static Assets Only)
          Parent Dir: 750          Parent Dir: 750        (PHP Execution DENIED)
-         Web Root: Direct         Web Root: Direct                │
+         Web Root: 755/644        Web Root: 755/644               │
          Temp: /site-a/tmp/       Temp: /site-b/tmp/              │
                 │                        │                        │
        FastCGI Unix Socket      FastCGI Unix Socket               │
@@ -48,8 +48,8 @@ Bashboard operates under a **Zero-Daemon Philosophy**:
                 ▼                        ▼                        │
         PHP-FPM Pool (A)         PHP-FPM Pool (B)                 │
         (pm = ondemand)          (pm = ondemand)                  │
-        sys_temp_dir Sandboxed   sys_temp_dir Sandboxed           │
-        Dynamic SRE Rebalancer   Dynamic SRE Rebalancer           │
+        open_basedir Sandbox     open_basedir Sandbox             │
+        Dynamic RAM Sizing       Dynamic RAM Sizing               │
         Slowlog: /logs/          Slowlog: /logs/                  │
                 │                        │                        │
                 └───────────┬────────────┘                        │
@@ -61,72 +61,71 @@ Bashboard operates under a **Zero-Daemon Philosophy**:
 
 ---
 
-## 📂 Project Structure
+## 📂 Repository Structure
 
 ```text
 bashboard/
 ├── bashboard.sh                    # Core TUI Monitor, Status Loop & Dynamic Dispatcher
-├── README.md                       # Comprehensive Technical Architecture & Operator Manual
-└── scripts/                        # Modular Workload Execution Engines
-    ├── 01_install_lemp.sh          # [1] Dual-OS LEMP Provisioner (Ondrej PPA / Sury Keyring)
-    ├── 02_create_vhost.sh          # [2] VHost Deployer (Session Sandboxing, SRE Rebalance, SSL)
-    ├── 03_wordpress_manager.sh     # [3] WP Manager (WSOD Recovery & Tenant Crontab Offloader)
-    ├── 04_harden_security.sh       # [4] DevSecOps Hardening (Anti-Lockout SSH, UFW, Fail2Ban)
-    ├── 06_log_optimizer.sh         # [6] Logrotate Engine (Dedicated Drop-ins & Journal Vacuum)
-    ├── 07_delete_vhost.sh          # [7] Atomic 8-Tier Tenant Purge Engine (User & Pool Purge)
-    └── 12_backup_gdrive.sh         # [12] Off-site Google Drive Backup (rclone & Non-locking Dump)
+├── README.md                       # Systems Architecture & Operator Manual
+└── scripts/                        # Modular Workload Engines
+    ├── 01_install_lemp.sh          # [1] Dual-OS LEMP Provisioner (Sury Keyring / Ondrej PPA)
+    ├── 02_create_vhost.sh          # [2] VHost Deployer (Hashed Tenants, Session Sandboxes, TLS)
+    ├── 03_wordpress_manager.sh     # [3] WP Manager (WSOD Recovery & Tenant-Isolated Crontab)
+    ├── 04_harden_security.sh       # [4] Security Hardening (Anti-Lockout SSH, UFW, Fail2Ban)
+    ├── 06_log_optimizer.sh         # [6] Logrotate Optimizer (Dedicated Drop-ins & Journal Vacuum)
+    ├── 07_delete_vhost.sh          # [7] Atomic 8-Tier Tenant Purge Engine (State Manifest Driven)
+    └── 12_backup_gdrive.sh         # [12] Offsite Backup Engine (rclone Sync & Non-locking Dumps)
 ```
 
 ---
 
-## 🚀 Built-In Modular Engines Breakdown
+## 🚀 Modular Engine Details
 
 ### `[1]` LEMP Stack Provisioner (`01_install_lemp.sh`)
-* **Dual-OS Repository Routing:** Detects Debian vs. Ubuntu cleanly via `/etc/os-release`. Deploys official Sury GPG keyrings on Debian (`packages.sury.org`) and Ondrej PPAs on Ubuntu, preventing package manager breakage.
-* **Modernized PHP Runtime (7.4–8.5+):** Installs standard enterprise extensions while stripping deprecated modules (such as `xmlrpc`) to eliminate APT dependency aborts.
-* **Idempotent MariaDB Hardening:** Preserves native `unix_socket` authentication on modern MariaDB (10.4+) while optionally configuring administrative passwords without breaking automated scripts.
-* **Structured System Task Logger:** Channels full command output to `/var/log/bashboard_lemp_install.log` while displaying clean console status indicators.
+* **Dual-OS Repository Management:** Detects Debian vs. Ubuntu via `/etc/os-release`. Imports official Sury GPG keyrings on Debian (`packages.sury.org`) and Ondrej PPAs on Ubuntu.
+* **Modernized PHP Runtime (7.4–8.5+):** Installs standard extensions while omitting deprecated packages (such as `xmlrpc`) to prevent APT dependency aborts.
+* **Idempotent MariaDB Hardening:** Preserves native `unix_socket` authentication on modern MariaDB (10.4+) while optionally configuring root credentials without breaking administrative CLI access.
+* **Task Logging:** Diverts raw command outputs to `/var/log/bashboard_lemp_install.log` while showing real-time `[OK]` status lines on the terminal.
 
 ### `[2]` Virtual Host & Tenant Provisioner (`02_create_vhost.sh`)
-* **Unique Hashed Tenant Users:** Creates unprivileged tenant users with a 4-character MD5 hash (`v_${name}_${hash}`) and groups with `/usr/sbin/nologin`, completely eliminating 14-character truncation collisions and duplicate group crashes (`exit code 9`).
-* **Cross-Tenant Session & Temp Sandboxing:** Isolates temporary uploads and session data into `/var/www/$DOMAIN/tmp/` with `chmod 700`. Completely removes global `/tmp/` from `open_basedir`, locking PHP within `/var/www/$DOMAIN/`, `/dev/urandom`, and `/usr/share/zoneinfo/`.
-* **Realpath Cache Performance Tuning:** Injects `realpath_cache_size = 4096k` and `realpath_cache_ttl = 600` into each tenant pool, completely neutralizing the filesystem stat overhead of `open_basedir`.
-* **Commercial-Grade Permissions Model:** Parent directory `/var/www/$DOMAIN` is locked down with `750` permissions (`$vhost_user:www-data`), barring access to other tenants (`Other = ---`). Web payload is owned by `$vhost_user:$vhost_user` with `FS_METHOD = 'direct'`, allowing seamless one-click plugin/theme updates and core updates from the WordPress dashboard without FTP prompts.
-* **Runtime SRE Memory Rebalancer:** Dynamically allocates `pm.max_children` after reserving at least 20% of host RAM (min 1536MB) for MariaDB buffer pools, Redis, and OS operations. Automatically rebalances all existing pools on creation and deletion, guarded by a PHP-FPM syntax test gate before calling `reload`.
-* **Tenant-Dedicated Logrotate Drop-ins:** Deploys individual configurations to `/etc/logrotate.d/vhost-$DOMAIN` with directory permissions `770` owned by `$vhost_user:www-data`, completely solving wildcard logrotate permission deadlocks. Nginx logs rotate via zero-loss `USR1` signals; PHP slow logs rotate via `copytruncate` under tenant identity.
-* **SRE Atomic Rollback Trap with Pre-existence Guard:** Traps any runtime `ERR` signal during deployment; purges partially staged configs and unbinds pools, but preserves pre-existing databases.
-* **Pre-Flight Let's Encrypt TLS Engine:** Queries public DNS-over-HTTPS (DoH) resolvers to verify that the public A-record matches the server's public IP before contacting ACME servers, preventing 5-attempt rate-limit lockouts.
+* **Collision-Resistant Tenant Identities:** Generates unprivileged tenant system users with an MD5-derived 4-character suffix (`v_${name}_${hash}`) and a system group with `/usr/sbin/nologin`, preventing 14-character truncation collisions and duplicate group errors.
+* **Commercial Permissions Model:** Parent directory `/var/www/$DOMAIN` is set to `750` (`$vhost_user:www-data`), completely blocking neighboring tenants (`Other = ---`). Web payloads are owned by `$vhost_user:$vhost_user` with `FS_METHOD = 'direct'`, allowing native one-click plugin and core updates from the WordPress dashboard without FTP credential prompts.
+* **Session & Temporary File Sandboxing:** Isolates temporary uploads and session data into `/var/www/$DOMAIN/tmp/` (`chmod 700`). Completely removes global `/tmp/` from `open_basedir`, locking the PHP process inside `/var/www/$DOMAIN/`, `/dev/urandom`, and `/usr/share/zoneinfo/`.
+* **Realpath Cache Optimization:** Tunes `realpath_cache_size = 4096k` and `realpath_cache_ttl = 600` inside each pool to eliminate filesystem stat overhead associated with `open_basedir`.
+* **Dynamic RAM Allocator & Rebalancer:** Calculates `pm.max_children` after reserving at least 20% of host RAM (min 1536MB) for MariaDB buffer pools, Redis, and the OS. Automatically rebalances all existing pools on creation or deletion, verified via `php-fpm -t` prior to reloading daemons.
+* **Dedicated Logrotate Drop-ins:** Configures per-site drop-ins in `/etc/logrotate.d/vhost-$DOMAIN` using `su $vhost_user www-data` on `770` directories. Nginx logs rotate via zero-loss `USR1` signals; PHP slow logs rotate via `copytruncate`.
+* **Atomic Rollback with Pre-existence Guard:** Traps runtime `ERR` signals; safely dismantles half-staged configurations if an error occurs, but preserves pre-existing databases.
+* **Pre-Flight Let's Encrypt TLS Engine:** Queries public DNS-over-HTTPS (DoH) resolvers to verify that the public A-record points to the server's public IP prior to contacting ACME servers, preventing rate-limit lockouts. Falls back safely to self-signed TLS.
 
 ### `[3]` WordPress Site Manager (`03_wordpress_manager.sh`)
-* **Tenant-Isolated Linux Crontab:** Disables web-triggered cron (`DISABLE_WP_CRON = true`) and installs an isolated `/etc/cron.d/` job executing every 10 minutes strictly as the site's tenant user (`v_<id>`). Injects `HOME` and `WP_CLI_CACHE_DIR=/tmp/wp-cache-$id` to eliminate `/nonexistent` directory creation warnings.
-* **Privilege-Dropped WP-CLI:** Runs all WP-CLI commands strictly as the tenant user using `runuser -u "$u"`, preventing compromised plugins from executing arbitrary code as root when an administrator views the management dashboard.
-* **Bulletproof WSOD Recovery:** Deactivates rogue plugins via `wp plugin deactivate --all --skip-plugins`, bypassing fatal PHP errors that crash standard WP-CLI calls.
-* **Zero-Leak Debugging:** Toggling `WP_DEBUG` automatically enforces `WP_DEBUG_LOG = true` and `WP_DEBUG_DISPLAY = false` to prevent leaking server paths and database credentials to visitors.
-* **Hardened Database Exports:** Streams MySQL dumps on-the-fly into `gzip` archives inside a root-restricted (`0700`) backup vault (`/var/backups/bashboard/`).
+* **Tenant-Isolated System Crontab:** Disables web-triggered cron (`DISABLE_WP_CRON = true`) and installs an isolated `/etc/cron.d/` job running every 10 minutes strictly as the site's tenant user (`v_<id>`). Injects `HOME` and `WP_CLI_CACHE_DIR` to prevent `/nonexistent` directory creation aborts.
+* **Privilege-Dropped WP-CLI:** Runs all WP-CLI operations strictly under the tenant's user identity using `runuser -u "$u"`, preventing rogue plugins from executing arbitrary code as root when an administrator opens the management console.
+* **WSOD Recovery:** Deactivates faulty plugins via `wp plugin deactivate --all --skip-plugins`, bypassing fatal PHP errors that crash standard WP-CLI invocations.
+* **Zero-Leak Debugging:** Toggling `WP_DEBUG` automatically configures `WP_DEBUG_LOG = true` and `WP_DEBUG_DISPLAY = false`, keeping stack traces and database credentials out of public HTML output.
+* **Non-Locking Database Exports:** Streams MySQL dumps on-the-fly into `gzip` archives inside a root-restricted (`0700`) backup vault (`/var/backups/bashboard/`).
 
 ### `[4]` DevSecOps Hardening Engine (`04_harden_security.sh`)
-* **Anti-Lockout Sudoer Sentinel:** Prohibits setting `PermitRootLogin no` unless at least one active non-root user in group `sudo` or `wheel` with a valid shell is detected on the system.
+* **Anti-Lockout Sudoer Sentinel:** Prohibits setting `PermitRootLogin no` unless at least one active non-root user in group `sudo` or `wheel` with a valid login shell is confirmed.
 * **OpenSSH Drop-in Priority:** Deploys configurations as `/etc/ssh/sshd_config.d/00-bashboard-hardening.conf` to guarantee precedence under OpenSSH's first-match-wins rule.
 * **Journald-Aware Fail2Ban:** Inspects the host logging system; automatically configures `backend = systemd` on modern Debian 12 and Ubuntu systems where `/var/log/auth.log` is absent.
 * **Asymmetric-Safe Network Mitigations:** Sets `net.ipv4.conf.*.rp_filter = 2` (Loose mode) to protect against spoofing without dropping valid traffic in multi-homed or cloud VPC environments.
 
 ### `[6]` Log Rotation Optimizer (`06_log_optimizer.sh`)
 * **Multi-Tenant Drop-in Synchronization:** Audits all active virtual hosts, ensures `/var/www/*/logs/` permissions are strictly `770` owned by `$vhost_user:www-data`, and synchronizes dedicated `/etc/logrotate.d/vhost-*` drop-ins.
-* **Native Zero-Loss Rotation:** Nginx logs rotate with physical move and `USR1` signal; application slowlogs rotate via `copytruncate`, eliminating file descriptor deadlocks and PHP-FPM permission crashes.
-* **Accurate Retention Calculus:** Correctly calculates daily vs. weekly rotation cycles before purging dead-weight `.gz` archives, preserving historical logs.
+* **Native Zero-Loss Rotation:** Nginx logs rotate with physical move and `USR1` signals; application slowlogs rotate via `copytruncate`, eliminating file descriptor deadlocks.
 * **Journald Storage Ceiling:** Enforces hard caps (`SystemMaxUse=150M`) in `/etc/systemd/journald.conf.d/` and provides instant log vacuuming.
 
 ### `[7]` Virtual Host Purge Engine (`07_delete_vhost.sh`)
-* **Manifest-Driven Database Discovery:** Reads `DB_NAME` and `DB_USER` from the immutable root-owned `.bashboard-state` manifest, preventing malicious or broken regex SQL injections.
+* **Manifest-Driven Database Discovery:** Reads `DB_NAME` and `DB_USER` from the root-owned `.bashboard-state` manifest, preventing broken regex drops or accidental database deletion.
 * **Process-Locking Termination:** Dispatches graceful `SIGTERM` followed by forceful `SIGKILL` to all active tenant processes prior to calling `userdel`, completely preventing `user is currently used by process` deletion aborts.
-* **Atomic 8-Tier Destruction:** Dismantles Nginx configs, revokes Certbot certificates, purges dedicated logrotate drop-ins, removes tenant system users AND primary groups, purges system crontabs, removes `/etc/hosts` entries, drops databases/users, and cleans web payloads and temp sandboxes.
-* **Runtime Memory Reclamation & Rebalance Gate:** Recalculates and rebalances `pm.max_children` across all remaining active pools after running syntax validation, distributing reclaimed RAM to active sites with zero downtime.
+* **Exact User & Group Eradication:** Verifies that the tenant username matches `^v_` and that the home path strictly equals `/var/www/$TARGET_SITE` before removing the account and group, protecting system users (such as `ubuntu` or `deploy`).
+* **Post-Purge SRE Health Check:** Validates Nginx syntax (`nginx -t`) and tests all PHP-FPM binary configurations (`php-fpmX.Y -t`) to guarantee the server remains healthy after deletion.
 
 ### `[12]` Automated Google Drive Backup Engine (`12_backup_gdrive.sh`)
-* **Zero-Locking WooCommerce-Safe Dumps:** Dumps MySQL databases using `--single-transaction --quick --routines --triggers`, preventing checkout stalls or database table-locking outages on live e-commerce stores.
-* **Off-Site Cloud Streaming:** Compresses databases and web payloads on-the-fly and streams them to your configured Google Drive remote via `rclone`.
-* **Automated Cloud Retention Pruning:** Deletes remote backup snapshots older than your retention policy (e.g., 14 days) directly on Google Drive, eliminating cloud storage overage.
-* **Nightly Automation:** Installs a non-intrusive system crontab in `/etc/cron.d/` running automatically at 03:00 AM.
+* **Non-Locking Dumps:** Runs `mysqldump` with `--single-transaction --quick --routines --triggers`, preventing table-locking stalls on live WooCommerce and transactional databases.
+* **Offsite Cloud Streaming:** Compresses databases and web payloads on-the-fly and streams them to your configured Google Drive remote via `rclone`.
+* **Automated Cloud Retention Pruning:** Automatically deletes remote backup snapshots older than your retention policy (default: 14 days) directly on Google Drive.
+* **Nightly Automation:** Installs a cron drop-in in `/etc/cron.d/bashboard-gdrive-backup` running automatically at 03:00 AM.
 
 ---
 
@@ -153,9 +152,37 @@ chown -R root:root /opt/bashboard
 
 ---
 
+## ☁️ Google Drive Backup Configuration Guide
+
+Bashboard uses `rclone` for zero-overhead, off-site cloud backups.
+
+### Step 1: Initialize rclone configuration
+Run `rclone config` in your server terminal:
+1. Enter `n` for a new remote.
+2. Name the remote strictly: **`bashboard-gdrive`**
+3. Storage type: enter `drive`
+4. Leave `client_id` and `client_secret` blank (press Enter).
+5. Scope: enter `1` (Full access to create/prune backup archives).
+6. Leave `root_folder_id` and `service_account_file` blank.
+7. Edit advanced config: enter `n`.
+8. Remote configuration / web browser: enter `n` (headless mode).
+
+### Step 2: Authorize Account
+Execute the authorization command provided by rclone on a local machine with a browser (`rclone authorize "drive"`), or establish an SSH tunnel (`ssh -L 53682:127.0.0.1:53682 root@SERVER_IP`), authenticate with Google, and paste the generated JSON token into the server prompt.
+
+### Step 3: Verify Connection
+```bash
+# Verify that the remote is connected and can query Google Drive:
+rclone lsd bashboard-gdrive:
+```
+
+Once connected, launch Bashboard, choose option **`[12]`**, and press **`[8]`** to enable automated nightly backups.
+
+---
+
 ## 📋 Recommended Operator Provisioning Workflow
 
-When bringing up a brand-new production node, follow this execution sequence:
+When configuring a brand-new production node, follow this execution sequence:
 
 ```text
 [Step 1] Option [1]  -> Provision LEMP Stack (Nginx, MariaDB, PHP-FPM, Redis, WP-CLI)
@@ -163,14 +190,14 @@ When bringing up a brand-new production node, follow this execution sequence:
 [Step 3] Option [2]  -> Deploy Virtual Host (Select WordPress or Blank, Isolated Tenant, SSL)
 [Step 4] Option [3]  -> WordPress Manager (Offload WP-Cron, Verify Checksums, Flush Cache)
 [Step 5] Option [6]  -> Log Optimizer (Synchronize dedicated drop-ins & Cap Journald)
-[Step 6] Option [12] -> Configure Google Drive Backup (Automate nightly off-site snapshots)
+[Step 6] Option [12] -> Configure Google Drive Backup (Enable nightly cloud sync)
 ```
 
 ---
 
 ## 🔍 Verification & Diagnostics Cheat Sheet
 
-As a systems engineer, verify your server's runtime health and security posture using these standard commands:
+Verify your server's runtime health and security posture using these standard commands:
 
 ### 1. Verify Multi-Tenant POSIX Isolation (Lateral Movement Test)
 Simulate a compromised tenant shell on Site B attempting to access Site A's configuration:
@@ -183,13 +210,13 @@ sudo -u v_site_b cat /var/www/site-a.com/public_html/wp-config.php
 ```
 
 ### 2. Verify True `open_basedir` Sandboxing (System Traversal Test)
-Execute an explicit test verifying that PHP-FPM's `open_basedir` restriction blocks access to world-readable system files:
+Verify that PHP-FPM's `open_basedir` restriction blocks access to world-readable system files:
 ```bash
-# Test that open_basedir successfully blocks reading /etc/passwd:
-sudo -u v_example_com php -d open_basedir="/var/www/example.com/:/tmp/wp-cache-example_com/" -r "echo is_readable('/etc/passwd') ? 'LEAK' : 'BLOCKED';"
+# Test that open_basedir blocks reading system files:
+sudo -u v_example_com php -d open_basedir="/var/www/example.com/:/dev/urandom" -r "echo is_readable('/etc/passwd') ? 'LEAK' : 'BLOCKED';"
 
 # Expected Output:
-# BLOCKED (open_basedir restriction in effect)
+# BLOCKED
 ```
 
 ### 3. Verify Cross-Tenant Temporary & Session Sandboxing
@@ -218,9 +245,21 @@ ls -la /run/php/php*-fpm-*.sock
 for fpm in /usr/sbin/php-fpm*; do "$fpm" -t; done
 ```
 
-### 6. Verify Tenant-Isolated WP-Cron Offloading
+### 6. Verify Zero-Trust Upload Sandboxing
 ```bash
-# Inspect the active system cron drop-in (Must show execution under tenant identity with HOME and WP_CLI_CACHE_DIR)
+# Create a dummy test script in the uploads directory
+echo "<?php phpinfo(); ?>" > /var/www/example.com/public_html/wp-content/uploads/test.php
+
+# Request via curl (Must return 403 Forbidden or 404 Not Found, NEVER 200 OK)
+curl -k -I https://example.com/wp-content/uploads/test.php
+
+# Remove test script
+rm -f /var/www/example.com/public_html/wp-content/uploads/test.php
+```
+
+### 7. Verify Tenant-Isolated WP-Cron Offloading
+```bash
+# Inspect the active system cron drop-in
 cat /etc/cron.d/bashboard-wp-*
 
 # Run cron event manually as tenant user to verify zero permission conflicts:
@@ -241,7 +280,7 @@ tail -n 20 /var/www/example.com/logs/nginx_error.log
 ls -la /run/php/php*-fpm-example_com.sock
 # Must show: srw-rw---- 1 www-data www-data
 
-# 3. If "111: Connection refused", check if PHP-FPM failed syntax due to an orphaned pool:
+# 3. If "111: Connection refused", test pool syntax for errors:
 sudo /usr/sbin/php-fpm$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;') -t
 ```
 
