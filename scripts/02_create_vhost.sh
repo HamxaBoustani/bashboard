@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [02] Nginx Virtual Host & Architecture Deployer (TUI Edition)
-# Version:          1.6.2 (Production Hardened: Unique Hashed Tenant Users,
-#                   DB Pre-existence Guard, State Manifest, Fallback Snippets)
+# Version:          1.6.3 (Production Hardened: Cross-Device Inter-FS Merging,
+#                   Unique Hashed Tenants, Sandbox Jails, DB Pre-existence Guard)
 # Architecture:     Interactive TUI Configurator | Commercial Hosting Standard
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -168,6 +168,7 @@ rebalance_all_pools() {
         fi
     done
 
+    # Syntax test gate: Verify pool syntax prior to reloading
     for fpm_bin in /usr/sbin/php-fpm*; do
         if [ -x "$fpm_bin" ]; then
             if ! "$fpm_bin" -t >/dev/null 2>&1; then
@@ -311,6 +312,7 @@ done
 # ------------------------------------------------------------------------------
 # 7. SRE ATOMIC ROLLBACK TRAP & C5 PRE-FLIGHT GUARDS
 # ------------------------------------------------------------------------------
+# C5 Guard: Prevent accidental overwrite or destruction of existing virtual hosts
 if [ -d "/var/www/$DOMAIN" ] || [ -f "/etc/nginx/sites-available/$DOMAIN" ] || [ -f "/etc/nginx/sites-enabled/$DOMAIN" ]; then
     echo -e "\n   ${RED}❌ [FATAL] Virtual Host '$DOMAIN' already exists on this server!${NC}" >&2
     echo -e "   ${YELLOW}Aborting to prevent destructive overwrite or accidental rollback.${NC}" >&2
@@ -319,11 +321,10 @@ fi
 
 PROVISIONING_STARTED=0
 pool_name=$(echo "$DOMAIN" | tr '.-' '_' | cut -c 1-32)
-# C3 Fix: Incorporates unique 4-character MD5 hash to prevent 14-char collision across subdomains
 domain_hash=$(echo -n "$DOMAIN" | md5sum | cut -c1-4)
 vhost_user="v_${pool_name:0:10}_${domain_hash}"
 
-# C5 Fix: Check if target database already exists prior to touching MySQL
+# Check if target database already exists prior to touching MySQL
 DB_PREEXISTED=0
 if [ "$PAYLOAD_TYPE" == "wordpress" ]; then
     set +e
@@ -349,7 +350,7 @@ rollback_on_failure() {
         rm -f "/etc/php/${PHP_VER}/fpm/pool.d/${pool_name}.conf" "/run/php/php${PHP_VER}-fpm-${pool_name}.sock"
         systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || true
 
-        # Only drop database if it was freshly created in this specific execution run
+        # Only drop database if it was freshly created in this execution run
         if [ "$PAYLOAD_TYPE" == "wordpress" ] && [ -n "${DB_NAME:-}" ] && [ "$DB_PREEXISTED" -eq 0 ]; then
             local db_pass_arg=""
             [ -n "$MYSQL_ADMIN_PASS" ] && db_pass_arg="-p$MYSQL_ADMIN_PASS"
@@ -385,6 +386,7 @@ media_root="$project_root/uploads"
 
 # 8.1 Idempotent Tenant User Provisioning
 echo -e "   [1/8] Provisioning dedicated unprivileged tenant identity: ${CYAN}${vhost_user}${NC}..."
+
 if ! getent group "$vhost_user" >/dev/null 2>&1; then
     groupadd -r "$vhost_user"
 fi
@@ -395,7 +397,7 @@ fi
 
 # 8.2 Prepare Directory Hierarchy, Temp Sandbox & TLS Certificates
 mkdir -p "$project_root" "$logs_dir" "$tmp_dir" "/etc/nginx/ssl"
-mkdir -p "$media_root"
+[[ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ]] && mkdir -p "$media_root"
 
 chown -R "$vhost_user:$vhost_user" "$tmp_dir"
 chmod 700 "$tmp_dir"
@@ -455,7 +457,7 @@ php_admin_value[upload_tmp_dir] = ${tmp_dir}
 php_admin_value[session.save_path] = ${tmp_dir}
 php_admin_value[sys_temp_dir] = ${tmp_dir}
 
-; Strict File Access Jail (Completely eliminates global /tmp/ leakage)
+; Strict File Access Jail (Eliminating global /tmp/ leakage)
 php_admin_value[open_basedir] = /var/www/${domain}/:/tmp/wp-cache-${domain}/:/dev/urandom:/usr/share/zoneinfo/
 
 ; Realpath Cache Performance Optimization (Neutralizes open_basedir I/O penalty)
@@ -489,7 +491,6 @@ rebalance_all_pools
 # 8.4 Compile Hardened Nginx Virtual Host Configuration
 echo -e "   [4/8] Compiling Nginx virtual host configuration..."
 
-# Regression 2 Fix: Auto-generate /etc/nginx/snippets/ssl-params.conf if missing
 if [ ! -f "/etc/nginx/snippets/ssl-params.conf" ]; then
     mkdir -p "/etc/nginx/snippets"
     cat > "/etc/nginx/snippets/ssl-params.conf" <<'EOF'
@@ -690,10 +691,10 @@ if [ "$PAYLOAD_TYPE" == "wordpress" ]; then
     wget -qO /tmp/wp-latest.zip https://wordpress.org/latest.zip
     unzip -q -o /tmp/wp-latest.zip -d /tmp/
 
-    shopt -s dotglob
-    mv /tmp/wordpress/* "$project_root/"
-    shopt -u dotglob
+    # Seamless cross-filesystem merge: Preserves target non-empty directory structures
+    cp -a /tmp/wordpress/. "$project_root/"
     rm -rf /tmp/wp-latest.zip /tmp/wordpress
+    mkdir -p "$media_root"
 
     wp core config \
         --dbname="$DB_NAME" \
@@ -740,7 +741,7 @@ EOF
 fi
 
 # ------------------------------------------------------------------------------
-# 11. COMMERCIAL-GRADE POSIX ACLS & STATE MANIFEST GENERATION
+# 11. COMMERCIAL-GRADE POSIX ACLS & DEDICATED LOGROTATE DEPLOYMENT
 # ------------------------------------------------------------------------------
 echo -e "   [7/8] Applying POSIX isolation & Tenant-Dedicated Logrotate..."
 
@@ -753,17 +754,17 @@ chown -R "$vhost_user:$vhost_user" "$project_root"
 find "$project_root" -type d -exec chmod 755 {} +
 find "$project_root" -type f -exec chmod 644 {} +
 
-# 3. C1 Hardening: wp-config.php strictly restricted to tenant user (600) - No www-data group leak
+# 3. wp-config.php restricted to tenant user with group-read
 if [ -f "$project_root/wp-config.php" ]; then
-    chown "$vhost_user:$vhost_user" "$project_root/wp-config.php"
-    chmod 600 "$project_root/wp-config.php"
+    chown "$vhost_user:www-data" "$project_root/wp-config.php"
+    chmod 640 "$project_root/wp-config.php"
 fi
 
 # 4. Logs directory strictly accessible by tenant and webserver
 chown -R "$vhost_user:www-data" "$logs_dir"
 chmod 770 "$logs_dir"
 
-# 5. Dedicated Logrotate Drop-in
+# 5. Dedicated Logrotate Drop-in: Uses $vhost_user www-data to eliminate permission deadlocks
 cat > "/etc/logrotate.d/vhost-$DOMAIN" <<EOF
 # Bashboard Dedicated Logrotate Policy for $DOMAIN
 $logs_dir/*access.log $logs_dir/*error.log {
@@ -793,7 +794,7 @@ $logs_dir/php_*.log {
 }
 EOF
 
-# 6. Immutable State Manifest: Guarantees 100% truthful discovery during deletion (C4 Guard)
+# 6. Immutable Root-Owned State Manifest (Guarantees safe unbinding on deletion)
 cat > "/var/www/$DOMAIN/.bashboard-state" <<EOF
 DOMAIN=$DOMAIN
 TENANT_USER=$vhost_user
@@ -885,7 +886,7 @@ echo -e "==================================================================${NC}
 echo -e "Primary Domain:        ${YELLOW}https://$DOMAIN${NC}"
 [[ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ]] && echo -e "Uploads Subdomain:     ${YELLOW}https://uploads.$DOMAIN${NC} (Root: ${WHITE}$media_root${NC})"
 echo -e "Payload Architecture:  ${WHITE}$( [ "$PAYLOAD_TYPE" == "wordpress" ] && echo "Standard WordPress" || echo "Blank Site" )${NC}"
-echo -e "Isolated Tenant User:  ${CYAN}${vhost_user}${NC} (Isolated Parent 750 / C1 Hardened 600)"
+echo -e "Isolated Tenant User:  ${CYAN}${vhost_user}${NC} (Isolated Parent 750 / Direct WP Control)"
 echo -e "Temp & Session Sandbox:${WHITE}$tmp_dir${NC} ${GREEN}(chmod 700 / sys_temp_dir)${NC}"
 echo -e "PHP-FPM Worker Ceiling:${WHITE}${safe_max_workers} Workers${NC} ${GREEN}(Rebalanced & OOM Protected)${NC}"
 echo -e "Dedicated Logrotate:   ${WHITE}/etc/logrotate.d/vhost-$DOMAIN${NC} ${GREEN}(Deadlock Free)${NC}"
