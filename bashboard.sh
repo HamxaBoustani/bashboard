@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD - Enterprise VPS Management System
-# Version:      1.6.2 (Production Hardened: 60s Balanced Polling, Truthful Status
+# Version:      1.6.3 (Production Hardened: 60s Balanced Polling, Truthful Status
 #               Sensors, Safe /proc Memory Parser, Child FD Lock Isolation)
 # Architecture: Multi-Tier | Active Caching | 100% Absolute Column Alignment
-# Platform:     Linux (Ubuntu 22.04/24.04 LTS, Debian 11/12)
+# Platform:     Linux (Ubuntu 22.04/24.04/26.04 LTS, Debian 11/12)
 # ==============================================================================
 set -euo pipefail
 

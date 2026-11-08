@@ -1,6 +1,6 @@
 # 🚀 Bashboard: Lightweight Linux VPS Control Plane & Multi-Site Orchestrator
 
-![Version](https://img.shields.io/badge/Version-1.6.2-blue.svg)
+![Version](https://img.shields.io/badge/Version-1.6.3-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-Ubuntu_22.04%20|%2024.04%20LTS%20|%20Debian_11%20|%2012-lightgrey.svg?logo=linux)
 ![Architecture](https://img.shields.io/badge/Architecture-Modular_Bash_TUI_%7C_Zero--Daemon-green.svg)
 ![Security](https://img.shields.io/badge/Security-POSIX_Isolated_%7C_Tenant_Sandboxing-red.svg)
@@ -139,7 +139,7 @@ bashboard/
 ```bash
 # 1. Clone the repository into /opt/
 cd /opt
-git clone https://github.com/yourusername/bashboard.git
+git clone https://github.com/HamxaBoustani/bashboard.git
 cd bashboard
 
 # 2. Grant administrative execution permissions across the suite
