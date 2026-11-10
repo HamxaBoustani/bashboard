@@ -491,7 +491,8 @@ if [ ! -f "/etc/nginx/conf.d/00-bashboard-rate-limit.conf" ]; then
     mkdir -p "/etc/nginx/conf.d"
     cat > "/etc/nginx/conf.d/00-bashboard-rate-limit.conf" <<'EOF'
 # Bashboard Global Security Zone: Mitigates WordPress Login Brute-Force
-limit_req_zone $binary_remote_addr zone=wplogin:10m rate=2r/s;
+limit_req_zone $binary_remote_addr zone=wplogin:10m rate=10r/m;
+limit_req_status 429;
 EOF
 fi
 
