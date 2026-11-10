@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [01] Enterprise LEMP Stack Interactive TUI Installer
-# Version:          0.9.3 (Production Hardened: Dual-OS Sury/PPA Engine,
-#                   Structured Task Logger, Phased Idempotency, Phpn-Safe Stack)
-# Architecture:     Interactive TUI | Dynamic Discovery | Non-Destructive
-# Supported OS:     Debian 11/12 (Bullseye/Bookworm), Ubuntu 20.04/22.04/24.04 LTS
+# Version:          1.0.0 (Production Hardened: Dual-OS Sury/PPA Engine, Cloudflare
+#                   Real-IP Ingestion, Global Rate-Limit Zone, Non-Destructive MariaDB)
+# Architecture:     Interactive TUI | Dynamic Discovery | Global Infrastructure Base
+# Platform:         Debian 11/12 (Bullseye/Bookworm), Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
 set -euo pipefail
 
@@ -29,7 +29,6 @@ else
     BOLD="${ESC}${B_O}1m";      NC="${ESC}${B_O}0m"
 fi
 
-# Neutralize ANSI byte-count artifacts via absolute hardware column positioning
 if tput hpa 47 >/dev/null 2>&1; then 
     COL_MID=$(tput hpa 47)
 else 
@@ -62,7 +61,7 @@ touch "$INSTALL_LOG" 2>/dev/null || true
 detect_installed_phps() {
     local phps=()
 
-    # 1. Scan live unix domain sockets in /run/php/ or /var/run/php/
+    # Scan live unix sockets
     for sock in /run/php/php*-fpm.sock /var/run/php/php*-fpm.sock; do
         if [ -S "$sock" ]; then
             local ver
@@ -71,7 +70,7 @@ detect_installed_phps() {
         fi
     done
 
-    # 2. Scan installed configuration trees under /etc/php/
+    # Scan installed configuration trees
     if [ -d "/etc/php" ]; then
         for d in /etc/php/*; do
             if [ -d "$d" ]; then
@@ -82,7 +81,6 @@ detect_installed_phps() {
         done
     fi
 
-    # Deduplicate and sort version list
     if [ ${#phps[@]} -gt 0 ]; then
         printf "%s\n" "${phps[@]}" | sort -uV | paste -sd "," -
     else
@@ -192,7 +190,7 @@ while true; do
         5) INSTALL_WPCLI=$(( 1 - INSTALL_WPCLI )) ;;
         6)
             echo -e "\n   ${CYAN}Detected on Server:${NC} ${SYSTEM_PHPS:-None}"
-            read -rp "   Enter Target PHP Version (e.g. 7.4, 8.1, 8.2, 8.3, 8.4): " user_php
+            read -rp "   Enter Target PHP Version (e.g. 7.4, 8.1, 8.2, 8.3, 8.4, 8.5): " user_php
             user_php=$(echo "$user_php" | tr -d '[:space:]')
             if [[ "$user_php" =~ ^[789]\.[0-9]+$ ]]; then
                 PHP_VER="$user_php"
@@ -237,7 +235,6 @@ echo -e "${CYAN}================================================================
 
 export DEBIAN_FRONTEND=noninteractive
 
-# Structured task runner that preserves logs while displaying clean console indicators
 run_task() {
     local task_name="$1"
     shift
@@ -259,16 +256,16 @@ run_task "Installing base build dependencies" apt-get install -y --no-install-re
     software-properties-common curl wget gnupg2 ca-certificates lsb-release ufw unzip
 
 # ------------------------------------------------------------------------------
-# 8. COMPONENT 1: NGINX WEBSERVER ENGINE
+# 8. COMPONENT 1: NGINX WEBSERVER & GLOBAL CLOUDFLARE/SECURITY PRIMITIVES
 # ------------------------------------------------------------------------------
 if [ "$INSTALL_NGINX" -eq 1 ]; then
-    echo -e "\n${BLUE}--- [1/5] Configuring Nginx Web Server ---${NC}"
+    echo -e "\n${BLUE}--- [1/5] Configuring Nginx Web Server & Global Primitives ---${NC}"
     run_task "Installing Nginx package" apt-get install -y nginx
     run_task "Enabling and starting Nginx daemon" systemctl enable --now nginx
 
-    mkdir -p /etc/nginx/snippets /etc/nginx/ssl
+    mkdir -p /etc/nginx/snippets /etc/nginx/ssl /etc/nginx/conf.d
 
-    # Deploy standard fastcgi snippet if missing
+    # 8.1 Standard FastCGI snippet
     if [ ! -f "/etc/nginx/snippets/fastcgi-php.conf" ]; then
         cat > "/etc/nginx/snippets/fastcgi-php.conf" <<'EOF'
 fastcgi_split_path_info ^(.+\.php)(/.+)$;
@@ -280,7 +277,7 @@ include fastcgi_params;
 EOF
     fi
 
-    # Deploy modern CIS/Mozilla-aligned TLS parameters
+    # 8.2 Standard modern TLS parameters
     if [ ! -f "/etc/nginx/snippets/ssl-params.conf" ]; then
         cat > "/etc/nginx/snippets/ssl-params.conf" <<'EOF'
 ssl_protocols TLSv1.2 TLSv1.3;
@@ -292,7 +289,49 @@ ssl_session_tickets off;
 EOF
     fi
 
-    # Validate syntax before reloading live web server
+    # 8.3 Global Cloudflare Real-IP Ingestion Engine (IPv4 & IPv6 with offline fallback)
+    run_task "Configuring Cloudflare Real-IP Ingestion (00-cloudflare-realip.conf)" bash -c '
+        cf_conf="/etc/nginx/conf.d/00-cloudflare-realip.conf"
+        cat > "$cf_conf" <<\EOF
+# Cloudflare Official IP Ranges (Restores Real Visitor IP)
+set_real_ip_from 173.245.48.0/20;
+set_real_ip_from 103.21.244.0/22;
+set_real_ip_from 103.22.200.0/22;
+set_real_ip_from 103.31.4.0/22;
+set_real_ip_from 141.101.64.0/18;
+set_real_ip_from 108.162.192.0/18;
+set_real_ip_from 190.93.240.0/20;
+set_real_ip_from 188.114.96.0/20;
+set_real_ip_from 197.234.240.0/22;
+set_real_ip_from 198.41.128.0/17;
+set_real_ip_from 162.158.0.0/15;
+set_real_ip_from 104.16.0.0/13;
+set_real_ip_from 104.24.0.0/14;
+set_real_ip_from 172.64.0.0/13;
+set_real_ip_from 131.0.72.0/22;
+set_real_ip_from 2400:cb00::/32;
+set_real_ip_from 2606:4700::/32;
+set_real_ip_from 2803:f800::/32;
+set_real_ip_from 2405:b500::/32;
+set_real_ip_from 2405:8100::/32;
+set_real_ip_from 2a06:98c0::/29;
+set_real_ip_from 2c0f:f248::/32;
+
+real_ip_header CF-Connecting-IP;
+real_ip_recursive on;
+EOF
+    '
+
+    # 8.4 Global Rate-Limit Zone (Rate: 10r/m, Status: 429)
+    run_task "Deploying Global Login Rate-Limit Zone (00-bashboard-rate-limit.conf)" bash -c '
+        rl_conf="/etc/nginx/conf.d/00-bashboard-rate-limit.conf"
+        printf "%s\n" \
+            "# Bashboard Global Security Zone: Mitigates WordPress Login Brute-Force" \
+            "limit_req_zone \$binary_remote_addr zone=wplogin:10m rate=10r/m;" \
+            "limit_req_status 429;" > "$rl_conf"
+    '
+
+    # Validate syntax and reload
     run_task "Validating Nginx configuration syntax" nginx -t
     systemctl reload nginx >> "$INSTALL_LOG" 2>&1 || true
 
@@ -309,7 +348,6 @@ if [ "$INSTALL_MARIADB" -eq 1 ]; then
     run_task "Installing MariaDB Server & Client" apt-get install -y mariadb-server mariadb-client
     run_task "Enabling and starting MariaDB daemon" systemctl enable --now mariadb
 
-    # Dynamically verify root connection mode (socket vs password)
     DB_CMD="mariadb"
     if ! mariadb -u root -e "SELECT 1;" >/dev/null 2>&1; then
         if [ -n "$DB_ROOT_PASS" ]; then
@@ -317,7 +355,6 @@ if [ "$INSTALL_MARIADB" -eq 1 ]; then
         fi
     fi
 
-    # Execute automated hardening idempotent script
     $DB_CMD <<EOSQL >> "$INSTALL_LOG" 2>&1 || true
 DELETE FROM mysql.user WHERE User='';
 DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
@@ -340,9 +377,9 @@ fi
 if [ "$INSTALL_PHP" -eq 1 ]; then
     echo -e "\n${BLUE}--- [3/5] Configuring PHP ${PHP_VER}-FPM Engine & Modules ---${NC}"
     
-    # OS-Specific Repository Routing: PPA for Ubuntu, Sury Keyring for Debian
+    # OS-Specific Repository Routing
     if [ "$OS_ID" = "ubuntu" ]; then
-        if ! grep -q "ondrej/php" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
+        if [ "$OS_CODENAME" != "resolute" ] && ! grep -q "ondrej/php" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
             run_task "Adding Ondrej PHP PPA for Ubuntu" add-apt-repository -y ppa:ondrej/php
             run_task "Refreshing APT cache for Ubuntu PPA" apt-get update -y
         fi
@@ -357,7 +394,6 @@ if [ "$INSTALL_PHP" -eq 1 ]; then
         fi
     fi
 
-    # Modernized extension set (deprecated extensions like xmlrpc strictly omitted)
     PHP_MODULES=(
         "php${PHP_VER}-fpm"
         "php${PHP_VER}-cli"
@@ -380,7 +416,6 @@ if [ "$INSTALL_PHP" -eq 1 ]; then
     run_task "Installing PHP ${PHP_VER}-FPM core & enterprise extensions" \
         apt-get install -y "${PHP_MODULES[@]}"
 
-    # Enforce standard execution and upload limits
     php_ini_file="/etc/php/${PHP_VER}/fpm/php.ini"
     if [ -f "$php_ini_file" ]; then
         run_task "Tuning PHP-FPM php.ini limits (128M Upload / 512M Memory)" bash -c "
@@ -403,7 +438,6 @@ if [ "$INSTALL_REDIS" -eq 1 ]; then
     echo -e "\n${BLUE}--- [4/5] Configuring Redis Cache Subsystem ---${NC}"
     run_task "Installing Redis Server" apt-get install -y redis-server
     
-    # Configure systemd supervision to prevent orphaned forks
     if [ -f "/etc/redis/redis.conf" ]; then
         run_task "Enforcing systemd supervision in redis.conf" \
             sed -i 's/^supervised no/supervised systemd/' /etc/redis/redis.conf
@@ -423,13 +457,11 @@ if [ "$INSTALL_WPCLI" -eq 1 ]; then
         tmp_wp=$(mktemp /tmp/wpcli_XXXXXX.phar)
         curl -fsSL -o "$tmp_wp" https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
         
-        # Verify physical file existence and non-zero size
         if ! test -s "$tmp_wp"; then
             rm -f "$tmp_wp"
             exit 1
         fi
         
-        # Verify executable PHAR integrity through PHP runtime
         if ! php "$tmp_wp" --info >/dev/null 2>&1; then
             rm -f "$tmp_wp"
             exit 1
