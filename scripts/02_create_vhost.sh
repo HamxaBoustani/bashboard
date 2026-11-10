@@ -689,21 +689,15 @@ else
     exit 1
 fi
 
-# 8.5 Smart Environment-Aware Localhost Resolution (/etc/hosts)
-is_private_or_local_ip() {
-    local ip="$1"
-    [[ "$ip" =~ ^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.) || -z "$ip" ]]
-}
+# 8.5 Universal Local Loopback Pinning (/etc/hosts)
+# Guarantees zero-latency internal requests for WordPress Site Health,
+# background workers, and WAF loopback tests without routing through Cloudflare/WAN.
+extra_hosts_entries=""
+[ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ] && extra_hosts_entries="uploads.$DOMAIN"
 
-local_lan_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")
-
-if is_private_or_local_ip "$local_lan_ip"; then
-    if ! grep -qE "[[:space:]]${DOMAIN}([[:space:]]|$)" /etc/hosts; then
-        echo "127.0.0.1 $DOMAIN www.$DOMAIN $( [ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ] && echo "uploads.$DOMAIN" )" >> /etc/hosts
-        echo -e "   ${GREEN}✅ Local dev environment detected: Hostname mapped to 127.0.0.1 (/etc/hosts).${NC}"
-    fi
-else
-    echo -e "   ${GRAY}Production public IP detected (${local_lan_ip}). Skipping /etc/hosts modification.${NC}"
+if ! grep -qE "[[:space:]]${DOMAIN}([[:space:]]|$)" /etc/hosts; then
+    echo "127.0.0.1 $DOMAIN www.$DOMAIN ${extra_hosts_entries}" >> /etc/hosts
+    echo -e "   ${GREEN}✅ Local Loopback Pinned: 127.0.0.1 mapped to ${DOMAIN} (/etc/hosts).${NC}"
 fi
 
 # ------------------------------------------------------------------------------
