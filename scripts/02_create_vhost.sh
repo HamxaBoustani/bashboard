@@ -489,11 +489,10 @@ echo -e "   [4/8] Compiling Nginx virtual host configuration..."
 # 1. Guarantee Global Rate-Limit Zone Exists (Prevents unknown limit_req_zone crash)
 if [ ! -f "/etc/nginx/conf.d/00-bashboard-rate-limit.conf" ]; then
     mkdir -p "/etc/nginx/conf.d"
-    cat > "/etc/nginx/conf.d/00-bashboard-rate-limit.conf" <<'EOF'
-# Bashboard Global Security Zone: Mitigates WordPress Login Brute-Force
-limit_req_zone $binary_remote_addr zone=wplogin:10m rate=10r/m;
-limit_req_status 429;
-EOF
+    printf "%s\n" \
+        "# Bashboard Global Security Zone: Mitigates WordPress Login Brute-Force" \
+        "limit_req_zone \$binary_remote_addr zone=wplogin:10m rate=10r/m;" \
+        "limit_req_status 429;" > "/etc/nginx/conf.d/00-bashboard-rate-limit.conf"
 fi
 
 # 2. Guarantee Standard TLS Parameters Snippet Exists
