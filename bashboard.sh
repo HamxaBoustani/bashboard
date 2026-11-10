@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD - Enterprise VPS Management System
-# Version:      1.6.4 (Production Hardened: 60s Balanced Polling, Truthful Status
-#               Sensors, Safe /proc Memory Parser, Child FD Lock Isolation)
+# Version:      1.6.4 (Production Hardened: Dual SSL Sensor, 60s Balanced Polling,
+#               True Status Sensors, Safe /proc Parser, Child Lock Isolation)
 # Architecture: Multi-Tier | Active Caching | 100% Absolute Column Alignment
-# Platform:     Linux (Ubuntu 22.04/24.04/26.04 LTS, Debian 11/12)
+# Platform:     Linux (Ubuntu 22.04/24.04 LTS, Debian 11/12)
 # ==============================================================================
 set -euo pipefail
 
@@ -121,7 +121,7 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# 4. SRE CACHING LAYER & STATUS-ACCURATE WRAPPERS
+# 4. SRE CACHING LAYER & STATUS-ACCURATE WRAPPERS (C7 Resolved)
 # ------------------------------------------------------------------------------
 safe_cmd() {
     local cmd="$1"
@@ -403,7 +403,7 @@ check_app() {
 }
 
 # ------------------------------------------------------------------------------
-# 7. UI RENDERING ENGINE & DATA PARSERS
+# 7. UI RENDERING ENGINE & SMART DUAL-SSL SENSOR
 # ------------------------------------------------------------------------------
 draw_bar() {
     local perc="${1:-0}"
@@ -469,26 +469,38 @@ draw_dashboard() {
     local S_PMA=$(check_app /usr/share/phpmyadmin "")
     local S_MEMC=$(check_daemon memcached "" "memcached")
 
-    local CERT_COUNT=$( (ls -1d /etc/letsencrypt/live/*/ 2>/dev/null || true) | wc -l )
+    # Smart Dual SSL Sensor: Detects both Let's Encrypt and Local Self-Signed Fallbacks
     local S_SSL="${GRAY}○ NOT INSTALLED${NC}"
-    if [ "$CERT_COUNT" -gt 0 ]; then
-        local min_days=999
-        local pem
-        for pem in /etc/letsencrypt/live/*/cert.pem; do
-            [ -e "$pem" ] || continue
+    local min_days=999
+    local total_certs=0
+    local is_letsencrypt=0
+
+    shopt -s nullglob
+    local le_pems=( /etc/letsencrypt/live/*/cert.pem )
+    local local_crts=( /etc/nginx/ssl/*.crt )
+    shopt -u nullglob
+
+    local all_certs=( "${le_pems[@]}" "${local_crts[@]}" )
+    total_certs=${#all_certs[@]}
+
+    if [ "$total_certs" -gt 0 ]; then
+        for cert in "${all_certs[@]}"; do
+            [ -f "$cert" ] || continue
+            [[ "$cert" == *"letsencrypt"* ]] && is_letsencrypt=1
+
             local exp_date
-            exp_date=$(openssl x509 -enddate -noout -in "$pem" 2>/dev/null | cut -d= -f2 || true)
+            exp_date=$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2 || true)
             if [ -n "$exp_date" ]; then
-                local exp_sec
+                local exp_sec now_sec days
                 exp_sec=$(date -d "$exp_date" +%s 2>/dev/null || echo 0)
-                local now_sec
                 now_sec=$(date +%s)
-                local days=$(( (exp_sec - now_sec) / 86400 ))
+                days=$(( (exp_sec - now_sec) / 86400 ))
                 [ "$days" -lt "$min_days" ] && min_days=$days
             fi
         done
+
         local renew_status="OFF"
-        if safe_cmd systemctl is-active --quiet certbot.timer 2>/dev/null || grep -q 'certbot' /etc/crontab /etc/cron.*/* 2>/dev/null; then 
+        if safe_cmd systemctl is-active --quiet certbot.timer 2>/dev/null; then 
             renew_status="ON"
         fi
 
@@ -497,7 +509,11 @@ draw_dashboard() {
         [ "$min_days" -le 5 ] && ssl_color=$RED
         [ "$min_days" -eq 999 ] && min_days="?"
 
-        S_SSL="${ssl_color}● OK ${GRAY}(${CERT_COUNT} certs | shortest: ${min_days} days | Auto: ${renew_status})${NC}"
+        if [ "$is_letsencrypt" -eq 1 ]; then
+            S_SSL="${ssl_color}● OK ${GRAY}(${total_certs} certs | shortest: ${min_days}d | Auto: ${renew_status})${NC}"
+        else
+            S_SSL="${YELLOW}● SELF-SIGNED ${GRAY}(${total_certs} certs | fallback active)${NC}"
+        fi
     fi
 
     local OPEN_PORTS
@@ -628,7 +644,7 @@ draw_dashboard() {
 }
 
 # ------------------------------------------------------------------------------
-# 8. MAIN EVENT LOOP (Balanced 60s Refresh)
+# 8. MAIN EVENT LOOP
 # ------------------------------------------------------------------------------
 get_static_info
 
@@ -638,7 +654,7 @@ while true; do
     tput cnorm 2>/dev/null || true
     echo -ne "\n   ${BOLD}${WHITE}Select an option (Auto-refresh: 60s):${NC} "
 
-    # 60-second non-disruptive timeout: preserves typing flow and eliminates process thrashing
+    # 60s non-blocking read: preserves keystrokes and eliminates process storming
     read -t 60 -r opt || opt=""
     [ -z "$opt" ] && opt="91"
 
@@ -701,7 +717,7 @@ while true; do
                     echo -e "${CYAN}>>> Executing Module: $(basename "$module_file") <<<${NC}\n"
 
                     set +e
-                    # Close FD 200 before executing child module to prevent lock descriptor leaks
+                    # Close lock FD 200 to prevent child process descriptor leakage
                     "$module_file" 200>&-
                     exit_code=$?
                     set -e
