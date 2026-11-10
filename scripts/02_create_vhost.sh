@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [02] Nginx Virtual Host & Architecture Deployer (TUI Edition)
-# Version:          1.6.3 (Production Hardened: Cross-Device Inter-FS Merging,
-#                   Unique Hashed Tenants, Sandbox Jails, DB Pre-existence Guard)
+# Version:          1.7.0 (CIS & OWASP Hardened: Canonical www 301, Global Rate-Limit
+#                   Zone, Sensitive File Denylist, Dedicated Pool FastCGI Buffers)
 # Architecture:     Interactive TUI Configurator | Commercial Hosting Standard
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -143,7 +143,6 @@ calculate_safe_max_children() {
         vhost_count=$(( vhost_count + 1 ))
     fi
 
-    # Reserve 20% (min 1536MB) for OS, MariaDB Buffer Pool & Redis
     reserved_ram=$(( mem_total_mb * 20 / 100 ))
     [ "$reserved_ram" -lt 1536 ] && reserved_ram=1536
     usable_ram=$(( mem_total_mb - reserved_ram ))
@@ -168,7 +167,6 @@ rebalance_all_pools() {
         fi
     done
 
-    # Syntax test gate: Verify pool syntax prior to reloading
     for fpm_bin in /usr/sbin/php-fpm*; do
         if [ -x "$fpm_bin" ]; then
             if ! "$fpm_bin" -t >/dev/null 2>&1; then
@@ -312,7 +310,6 @@ done
 # ------------------------------------------------------------------------------
 # 7. SRE ATOMIC ROLLBACK TRAP & C5 PRE-FLIGHT GUARDS
 # ------------------------------------------------------------------------------
-# C5 Guard: Prevent accidental overwrite or destruction of existing virtual hosts
 if [ -d "/var/www/$DOMAIN" ] || [ -f "/etc/nginx/sites-available/$DOMAIN" ] || [ -f "/etc/nginx/sites-enabled/$DOMAIN" ]; then
     echo -e "\n   ${RED}❌ [FATAL] Virtual Host '$DOMAIN' already exists on this server!${NC}" >&2
     echo -e "   ${YELLOW}Aborting to prevent destructive overwrite or accidental rollback.${NC}" >&2
@@ -324,7 +321,6 @@ pool_name=$(echo "$DOMAIN" | tr '.-' '_' | cut -c 1-32)
 domain_hash=$(echo -n "$DOMAIN" | md5sum | cut -c1-4)
 vhost_user="v_${pool_name:0:10}_${domain_hash}"
 
-# Check if target database already exists prior to touching MySQL
 DB_PREEXISTED=0
 if [ "$PAYLOAD_TYPE" == "wordpress" ]; then
     set +e
@@ -350,7 +346,6 @@ rollback_on_failure() {
         rm -f "/etc/php/${PHP_VER}/fpm/pool.d/${pool_name}.conf" "/run/php/php${PHP_VER}-fpm-${pool_name}.sock"
         systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || true
 
-        # Only drop database if it was freshly created in this execution run
         if [ "$PAYLOAD_TYPE" == "wordpress" ] && [ -n "${DB_NAME:-}" ] && [ "$DB_PREEXISTED" -eq 0 ]; then
             local db_pass_arg=""
             [ -n "$MYSQL_ADMIN_PASS" ] && db_pass_arg="-p$MYSQL_ADMIN_PASS"
@@ -488,9 +483,19 @@ EOF
 php_socket=$(configure_isolated_php_pool "$DOMAIN" "$PHP_VER")
 rebalance_all_pools
 
-# 8.4 Compile Hardened Nginx Virtual Host Configuration
+# 8.4 Compile Hardened Nginx Virtual Host Configuration (OWASP & CIS Hardened)
 echo -e "   [4/8] Compiling Nginx virtual host configuration..."
 
+# 1. Guarantee Global Rate-Limit Zone Exists (Prevents unknown limit_req_zone crash)
+if [ ! -f "/etc/nginx/conf.d/00-bashboard-rate-limit.conf" ]; then
+    mkdir -p "/etc/nginx/conf.d"
+    cat > "/etc/nginx/conf.d/00-bashboard-rate-limit.conf" <<'EOF'
+# Bashboard Global Security Zone: Mitigates WordPress Login Brute-Force
+limit_req_zone $binary_remote_addr zone=wplogin:10m rate=2r/s;
+EOF
+fi
+
+# 2. Guarantee Standard TLS Parameters Snippet Exists
 if [ ! -f "/etc/nginx/snippets/ssl-params.conf" ]; then
     mkdir -p "/etc/nginx/snippets"
     cat > "/etc/nginx/snippets/ssl-params.conf" <<'EOF'
@@ -515,16 +520,27 @@ else
     listen_ssl_v6="listen [::]:443 ssl http2;"
 fi
 
-extra_server_name=""
-[[ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ]] && extra_server_name="uploads.$DOMAIN"
-
 cat > "$nginx_conf" <<EOF
-# HTTP (80) -> Redirect All Requests to HTTPS (443)
+# HTTP (80) -> Redirect All Requests to HTTPS Non-WWW (Clean Root Return)
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN www.$DOMAIN $extra_server_name;
-    return 301 https://\$host\$request_uri;
+    server_name $DOMAIN www.$DOMAIN;
+    return 301 https://$DOMAIN\$request_uri;
+}
+
+# HTTPS (443) -> Canonical Redirect: www -> non-www
+server {
+    $listen_ssl
+    $listen_ssl_v6
+    $http2_directive
+    server_name www.$DOMAIN;
+
+    ssl_certificate     $cert_file;
+    ssl_certificate_key $key_file;
+    include snippets/ssl-params.conf;
+
+    return 301 https://$DOMAIN\$request_uri;
 }
 
 # Primary Domain Virtual Host
@@ -532,58 +548,95 @@ server {
     $listen_ssl
     $listen_ssl_v6
     $http2_directive
-    server_name $DOMAIN www.$DOMAIN;
+    server_name $DOMAIN;
 
     root $project_root;
     index index.php index.html;
 
-    ssl_certificate $cert_file;
+    ssl_certificate     $cert_file;
     ssl_certificate_key $key_file;
-    ssl_protocols TLSv1.2 TLSv1.3;
     include snippets/ssl-params.conf;
 
     access_log $logs_dir/nginx_access.log;
-    error_log $logs_dir/nginx_error.log;
+    error_log  $logs_dir/nginx_error.log;
 
+    server_tokens off;
     client_max_body_size 256M;
 
-    location / {
-        try_files \$uri \$uri/ /index.php?\$args;
+    # Baseline Security Headers
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # 1. Protect hidden files (.git, .env, .htaccess) while permitting ACME validation
+    location ~ /\.(?!well-known) {
+        deny all;
     }
 
-    location ~ \.php$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:$php_socket;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    # 2. Block sensitive project, dependency, lock and configuration files
+    location ~* ^/(?:.*/)?(?:wp-config(?:-sample)?\.php|readme\.html|license\.txt|composer\.(?:json|lock)|package(?:-lock)?\.json|yarn\.lock|phpunit\.xml(?:\.dist)?)$ {
+        deny all;
     }
 
+    # 3. Block dump, database, backup and log files
+    location ~* \.(?:bak|old|orig|save|sql|log|swp)$ {
+        deny all;
+    }
+
+    # 4. Zero-Trust Media Sandboxing: Completely block script execution in uploads
     location ^~ /wp-content/uploads/ {
-        try_files \$uri \$uri/ =404;
+        try_files \$uri =404;
         location ~ \.php$ {
             deny all;
         }
     }
     location ^~ /uploads/ {
-        try_files \$uri \$uri/ =404;
+        try_files \$uri =404;
         location ~ \.php$ {
             deny all;
         }
     }
 
-    location ~* /(?:wp-content/uploads/|uploads/)?(\.ht|\.git|\.env|wp-config\.php|readme\.html|license\.txt) {
-        deny all;
-    }
-    location ~ /\. {
-        deny all;
+    # 5. WordPress Core Permalinks Router
+    location / {
+        try_files \$uri \$uri/ /index.php?\$args;
     }
 
+    # 6. Login Brute-Force Rate Limiting (Burst: 5, Dedicated Pool Socket)
+    location = /wp-login.php {
+        limit_req zone=wplogin burst=5 nodelay;
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:$php_socket;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_read_timeout 120s;
+        fastcgi_buffers 16 16k;
+        fastcgi_buffer_size 32k;
+    }
+
+    # 7. FastCGI PHP Handler (Mapped strictly to Tenant Isolated Pool)
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:$php_socket;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_read_timeout 120s;
+        fastcgi_buffers 16 16k;
+        fastcgi_buffer_size 32k;
+    }
+
+    # 8. Static Assets Caching & Disk I/O Optimization
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|webp|avif|woff|woff2)$ {
-        expires max;
+        expires 30d;
+        add_header X-Content-Type-Options "nosniff" always;
+        access_log off;
         log_not_found off;
     }
+
+    location = /favicon.ico { log_not_found off; access_log off; }
+    location = /robots.txt  { log_not_found off; access_log off; try_files \$uri /index.php?\$args; }
 }
 EOF
 
+# Append Isolated Media Subdomain block if requested by operator
 if [ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ]; then
 cat >> "$nginx_conf" <<EOF
 
@@ -597,12 +650,12 @@ server {
     root $media_root;
     index index.html;
 
-    ssl_certificate $cert_file;
+    ssl_certificate     $cert_file;
     ssl_certificate_key $key_file;
     include snippets/ssl-params.conf;
 
     access_log $logs_dir/uploads_access.log;
-    error_log $logs_dir/uploads_error.log;
+    error_log  $logs_dir/uploads_error.log;
 
     client_max_body_size 256M;
 
@@ -610,6 +663,7 @@ server {
         try_files \$uri \$uri/ =404;
     }
 
+    # Zero-Trust Policy: Terminate any executable PHP execution attempt
     location ~ \.php$ {
         deny all;
     }
@@ -644,7 +698,7 @@ local_lan_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")
 
 if is_private_or_local_ip "$local_lan_ip"; then
     if ! grep -qE "[[:space:]]${DOMAIN}([[:space:]]|$)" /etc/hosts; then
-        echo "127.0.0.1 $DOMAIN www.$DOMAIN ${extra_server_name}" >> /etc/hosts
+        echo "127.0.0.1 $DOMAIN www.$DOMAIN $( [ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ] && echo "uploads.$DOMAIN" )" >> /etc/hosts
         echo -e "   ${GREEN}✅ Local dev environment detected: Hostname mapped to 127.0.0.1 (/etc/hosts).${NC}"
     fi
 else
@@ -691,7 +745,7 @@ if [ "$PAYLOAD_TYPE" == "wordpress" ]; then
     wget -qO /tmp/wp-latest.zip https://wordpress.org/latest.zip
     unzip -q -o /tmp/wp-latest.zip -d /tmp/
 
-    # Seamless cross-filesystem merge: Preserves target non-empty directory structures
+    # Seamless cross-filesystem merge: Preserves target directory structures
     cp -a /tmp/wordpress/. "$project_root/"
     rm -rf /tmp/wp-latest.zip /tmp/wordpress
     mkdir -p "$media_root"
@@ -754,10 +808,10 @@ chown -R "$vhost_user:$vhost_user" "$project_root"
 find "$project_root" -type d -exec chmod 755 {} +
 find "$project_root" -type f -exec chmod 644 {} +
 
-# 3. wp-config.php restricted to tenant user with group-read
+# 3. wp-config.php restricted to tenant user (600): Absolute isolation against cross-tenant snooping
 if [ -f "$project_root/wp-config.php" ]; then
-    chown "$vhost_user:www-data" "$project_root/wp-config.php"
-    chmod 640 "$project_root/wp-config.php"
+    chown "$vhost_user:$vhost_user" "$project_root/wp-config.php"
+    chmod 600 "$project_root/wp-config.php"
 fi
 
 # 4. Logs directory strictly accessible by tenant and webserver
@@ -884,11 +938,13 @@ echo -e "\n${GREEN}=============================================================
 echo -e "   🎉 Virtual Host & Environment Provisioned Successfully!"
 echo -e "==================================================================${NC}"
 echo -e "Primary Domain:        ${YELLOW}https://$DOMAIN${NC}"
+echo -e "Canonical Redirect:    ${WHITE}https://www.$DOMAIN -> https://$DOMAIN (301)${NC}"
 [[ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ]] && echo -e "Uploads Subdomain:     ${YELLOW}https://uploads.$DOMAIN${NC} (Root: ${WHITE}$media_root${NC})"
 echo -e "Payload Architecture:  ${WHITE}$( [ "$PAYLOAD_TYPE" == "wordpress" ] && echo "Standard WordPress" || echo "Blank Site" )${NC}"
-echo -e "Isolated Tenant User:  ${CYAN}${vhost_user}${NC} (Isolated Parent 750 / Direct WP Control)"
+echo -e "Isolated Tenant User:  ${CYAN}${vhost_user}${NC} (Isolated Parent 750 / C1 Hardened 600)"
 echo -e "Temp & Session Sandbox:${WHITE}$tmp_dir${NC} ${GREEN}(chmod 700 / sys_temp_dir)${NC}"
 echo -e "PHP-FPM Worker Ceiling:${WHITE}${safe_max_workers} Workers${NC} ${GREEN}(Rebalanced & OOM Protected)${NC}"
+echo -e "Security Hardening:    ${GREEN}Brute-Force Rate Limiting Active (/wp-login.php)${NC}"
 echo -e "Dedicated Logrotate:   ${WHITE}/etc/logrotate.d/vhost-$DOMAIN${NC} ${GREEN}(Deadlock Free)${NC}"
 echo -e "Web Setup Entrypoint:  ${CYAN}$setup_url${NC}"
 
@@ -905,5 +961,7 @@ echo -e "------------------------------------------------------------------"
 echo -e "Logs & Diagnostic Paths:"
 echo -e "  - Slow Queries:      ${WHITE}$logs_dir/php_slow.log${NC}"
 echo -e "  - PHP Error Stream:  ${WHITE}$logs_dir/php_error.log${NC}"
+echo -e "  - Nginx Access Stream:${WHITE}$logs_dir/nginx_access.log${NC}"
+echo -e "  - Nginx Error Stream: ${WHITE}$logs_dir/nginx_error.log${NC}"
 echo -e "${GREEN}==================================================================${NC}"
 exit 0
