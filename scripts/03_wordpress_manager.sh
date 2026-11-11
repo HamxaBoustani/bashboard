@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [03] WordPress Site Manager (Enterprise TUI Edition)
-# Version:          1.6.2 (Production Hardened: C2 Privilege Drop via runuser,
-#                   Isolated Cache Injection, C6 Local Scope Fix, 600 wp-config)
-# Architecture:     2-Column Contextual TUI | Live Health Metrics | Disaster Recovery
+# Version:          1.8.0 (Non-Intrusive SRE: Manual wp-config Advisory, Tenant-
+#                   Isolated 5m Cron, Single-Lock Runner, Privilege-Dropped CLI)
+# Architecture:     2-Column Symmetrical TUI | Live Telemetry | Disaster Recovery
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
 set -euo pipefail
@@ -161,12 +161,12 @@ get_vhost_user() {
     echo "$u"
 }
 
-# C2 Bug Fix: Refuses to execute as root; runs strictly as the isolated tenant user
+# C2 Hardened WP-CLI runner: Drops root privileges safely with explicit shell & env overrides
 wp_run() {
     local u
     u=$(get_vhost_user)
     if [[ ! "$u" =~ ^v_ ]]; then
-        echo -e "   ${RED}❌ [CRITICAL] Refusing to execute WP-CLI as non-tenant/root user ($u).${NC}" >&2
+        echo -e "   ${RED}❌ [CRITICAL] Refusing to execute WP-CLI as non-tenant user ($u).${NC}" >&2
         return 1
     fi
     runuser -u "$u" -s /bin/bash -- env HOME="/var/www/$SELECTED_DOMAIN" \
@@ -213,8 +213,44 @@ enforce_permissions() {
 }
 
 # ------------------------------------------------------------------------------
-# 6. SYSTEM-LEVEL WP-CRON ORCHESTRATION ENGINE (With Injected Environment)
+# 6. CRON RUNNER ASSERTION & SCHEDULER ORCHESTRATION (Non-Intrusive Advisory)
 # ------------------------------------------------------------------------------
+ensure_cron_runner() {
+    local runner="/usr/local/bin/bashboard-cron-runner"
+    if [ ! -f "$runner" ]; then
+        cat << 'EOF' > "$runner"
+#!/usr/bin/env bash
+# ==============================================================================
+# BASHBOARD CRON RUNNER ENGINE
+# Architecture: Single Lock Capsule, Memory Guard (512M), Action Scheduler Sync
+# ==============================================================================
+set -e
+
+DOMAIN="${1:-}"
+WP_PATH="${2:-}"
+
+if [[ -z "$DOMAIN" || -z "$WP_PATH" ]]; then
+    echo "Usage: $0 <domain> <wp_path>" >&2
+    exit 1
+fi
+
+LOCK_FILE="/var/www/${DOMAIN}/tmp/cron.lock"
+
+# Execute inside a single atomic flock capsule to eliminate overlaps
+/usr/bin/flock -n "${LOCK_FILE}" -c "
+    /usr/bin/php -d memory_limit=512M -d error_reporting='E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE' \
+        /usr/local/bin/wp cron event run --due-now --path='${WP_PATH}' --quiet 2>/dev/null || true
+
+    if /usr/local/bin/wp --path='${WP_PATH}' command exists action-scheduler >/dev/null 2>&1; then
+        /usr/bin/php -d memory_limit=512M \
+            /usr/local/bin/wp action-scheduler run --path='${WP_PATH}' --batch-size=100 --quiet 2>/dev/null || true
+    fi
+"
+EOF
+        chmod 755 "$runner"
+    fi
+}
+
 toggle_system_wpcron() {
     local domain="$1"
     local wp_path="$2"
@@ -227,15 +263,22 @@ toggle_system_wpcron() {
     echo -e "\n${BLUE}--- System-Level WP-Cron Orchestrator ---${NC}"
 
     if [ -f "$cron_file" ]; then
-        echo -e "   Disabling Linux Crontab and reverting to standard Web-triggered WP-Cron..."
+        echo -e "   Disabling Linux Crontab for ${YELLOW}${domain}${NC}..."
         rm -f "$cron_file"
-        wp_run config set DISABLE_WP_CRON false --raw 2>/dev/null || true
         enforce_permissions
-        echo -e "   ${YELLOW}● Reverted: WP-Cron is now triggered by web visitors.${NC}"
+        echo -e "   ${YELLOW}● Crontab removed: ${cron_file}${NC}"
+        echo -e "\n   ${CYAN}ℹ️  ADVISORY:${NC} If you manually added ${WHITE}define( 'DISABLE_WP_CRON', true );${NC} in ${YELLOW}wp-config.php${NC},"
+        echo -e "   you can now remove it or set it to ${WHITE}false${NC} to restore web visitor triggers."
     else
-        echo -e "   Hardening: Disabling web-triggered cron and offloading to Linux crontab..."
-        wp_run config set DISABLE_WP_CRON true --raw 2>/dev/null || true
+        echo -e "   Deploying isolated Linux crontab for ${YELLOW}${domain}${NC} (5-Minute Cadence)..."
 
+        # 1. Guarantee global runner binary exists
+        ensure_cron_runner
+
+        # 2. Calculate deterministic anti-thundering-herd delay (0-40s)
+        local delay=$(( 16#$(echo -n "$domain" | md5sum | cut -c1-2) % 40 ))
+
+        # 3. Deploy crontab drop-in running as tenant user
         cat > "$cron_file" <<EOF
 # Bashboard Automated WP-Cron for $domain
 # Runs strictly as $vhost_user with isolated execution envelopes
@@ -244,19 +287,61 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 HOME=/var/www/$domain
 WP_CLI_CACHE_DIR=/var/www/$domain/tmp/wp-cache
 
-*/10 * * * * $vhost_user /usr/bin/php -d memory_limit=256M -d error_reporting="E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE" /usr/local/bin/wp cron event run --due-now --path=$wp_path --quiet >/dev/null 2>&1
+*/5 * * * * $vhost_user sleep $delay; /usr/local/bin/bashboard-cron-runner $domain $wp_path >/dev/null 2>&1 || true
 EOF
         chmod 644 "$cron_file"
         enforce_permissions
 
-        echo -e "   ${GREEN}✅ Linux Crontab deployed: ${CYAN}$cron_file${NC} (Executing as: ${WHITE}$vhost_user${NC})"
-        echo -e "   ${GREEN}✅ Web-trigger disabled: (DISABLE_WP_CRON = true)${NC}"
-        echo -e "   ${GRAY}WP-Cron tasks will now execute every 10m independently of site visitors.${NC}"
+        echo -e "   ${GREEN}✅ Global Runner Verified : ${WHITE}/usr/local/bin/bashboard-cron-runner${NC}"
+        echo -e "   ${GREEN}✅ Linux Crontab deployed : ${CYAN}$cron_file${NC} (User: ${WHITE}$vhost_user${NC}, Delay: ${YELLOW}${delay}s${NC})"
+
+        # Non-intrusive manual advisory: Keeps wp-config.php modifications strictly in user control
+        echo -e "\n   ${YELLOW}📋 MANUAL ACTION RECOMMENDED:${NC}"
+        echo -e "   To disable redundant web-visitor execution, add this line to your ${CYAN}wp-config.php${NC}:"
+        echo -e "   ${BOLD}${WHITE}define( 'DISABLE_WP_CRON', true );${NC}"
     fi
+    echo ""
+    read -rp "Press Enter to return to site dashboard..."
 }
 
 # ------------------------------------------------------------------------------
-# 7. CONTEXTUAL SITE DASHBOARD RENDERER
+# 7. CRON HEALTH DIAGNOSTICS & TEST RUNNER
+# ------------------------------------------------------------------------------
+inspect_and_test_cron() {
+    clear
+    echo -e "${CYAN}==================================================================${NC}"
+    echo -e "   🩺 ${BOLD}${WHITE}WordPress Cron Health & Diagnostics Suite${NC}"
+    echo -e "   Site: ${YELLOW}$SELECTED_DOMAIN${NC}"
+    echo -e "${CYAN}==================================================================${NC}\n"
+
+    echo -e "${BLUE}[1/3] Inspecting Scheduled Event Table & Next Execution Windows...${NC}"
+    wp_run cron event list --fields=hook,next_run_relative,recurrence 2>/dev/null || {
+        echo -e "   ${RED}❌ Failed to query cron events via WP-CLI.${NC}"
+    }
+
+    echo -e "\n${BLUE}[2/3] Executing Overdue & Due Tasks Immediately (--due-now)...${NC}"
+    local run_output
+    run_output=$(wp_run cron event run --due-now 2>&1 || true)
+    if [ -n "$run_output" ]; then
+        echo -e "${GRAY}$run_output${NC}"
+    else
+        echo -e "   ${GREEN}✅ All scheduled hooks are up-to-date. Zero overdue events.${NC}"
+    fi
+
+    echo -e "\n${BLUE}[3/3] Testing Core Loopback Engine & Cron Health...${NC}"
+    if wp_run cron test >/dev/null 2>&1; then
+        echo -e "   ${GREEN}✅ Cron engine verified healthy and responsive.${NC}"
+    else
+        echo -e "   ${YELLOW}⚠️  WP-Cron test hook returned non-zero response (Verify /etc/hosts loopback).${NC}"
+    fi
+
+    enforce_permissions
+    echo ""
+    read -rp "Press Enter to return to site dashboard..."
+}
+
+# ------------------------------------------------------------------------------
+# 8. CONTEXTUAL SITE DASHBOARD RENDERER (Symmetrical 5x2 Matrix)
 # ------------------------------------------------------------------------------
 draw_site_dashboard() {
     clear
@@ -282,7 +367,7 @@ draw_site_dashboard() {
     local cron_id
     cron_id=$(echo "$SELECTED_DOMAIN" | tr '.-' '_')
     if [ -f "/etc/cron.d/bashboard-wp-${cron_id}" ]; then
-        cron_status="${GREEN}● Linux Crontab (10m)${NC}"
+        cron_status="${GREEN}● Linux Crontab (5m)${NC}"
     fi
 
     p_active=$(wp_run plugin list --status=active --format=count 2>/dev/null || echo "0")
@@ -318,22 +403,23 @@ draw_site_dashboard() {
 
     printf "   ${CYAN}[1]${NC} %-36s" "🔄 Flush Caches (Redis/Transients)"
     echo -ne "${COL_MID}${GRAY}│${NC}   "
-    printf "${CYAN}[5]${NC} %s\n" "🔌 Update All Plugins & Themes"
+    printf "${CYAN}[6]${NC} %s\n" "🚨 Deactivate ALL Plugins (WSOD Fix)"
 
     printf "   ${CYAN}[2]${NC} %-36s" "🛠️  Toggle Maintenance Mode"
     echo -ne "${COL_MID}${GRAY}│${NC}   "
-    printf "${CYAN}[6]${NC} %s\n" "🚨 Deactivate ALL Plugins (WSOD Fix)"
+    printf "${CYAN}[7]${NC} %s\n" "🐞 Toggle WP_DEBUG On/Off"
 
     printf "   ${CYAN}[3]${NC} %-36s" "👤 Reset / Create Administrator"
     echo -ne "${COL_MID}${GRAY}│${NC}   "
-    printf "${CYAN}[7]${NC} %s\n" "🐞 Toggle WP_DEBUG On/Off"
+    printf "${CYAN}[8]${NC} %s\n" "💾 Export Database Backup (Gzip SQL)"
 
     printf "   ${CYAN}[4]${NC} %-36s" "🔒 Verify Core Integrity (Checksums)"
     echo -ne "${COL_MID}${GRAY}│${NC}   "
-    printf "${CYAN}[8]${NC} %s\n" "💾 Export Database Backup (Gzip SQL)"
+    printf "${CYAN}[9]${NC} %s\n" "⏱️  Toggle System-Level WP-Cron (5m)"
 
-    printf "   ${CYAN}[9]${NC} %-36s" "⏱️  Toggle System-Level WP-Cron"
-    echo -ne "${COL_MID}${GRAY}│${NC}\n"
+    printf "   ${CYAN}[5]${NC} %-36s" "🔌 Update All Plugins & Themes"
+    echo -ne "${COL_MID}${GRAY}│${NC}   "
+    printf "${CYAN}[10]${NC} %s\n" "🩺 Test Cron & Inspect Schedules"
 
     echo -e "\n${CYAN}├────────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
     echo -e "   ${RED}${BOLD}[0] ↩️  EXIT TO BASHBOARD ROOT${NC}"
@@ -341,12 +427,12 @@ draw_site_dashboard() {
 }
 
 # ------------------------------------------------------------------------------
-# 8. COMMAND DISPATCHER & RESILIENT ACTIONS
+# 9. COMMAND DISPATCHER & RESILIENT ACTIONS
 # ------------------------------------------------------------------------------
 while true; do
     draw_site_dashboard
     tput cnorm 2>/dev/null || true
-    echo -ne "\n   ${BOLD}${WHITE}Choose an action [0-9]:${NC} "
+    echo -ne "\n   ${BOLD}${WHITE}Choose an action [0-10]:${NC} "
     read -r act || act="0"
 
     case "$act" in
@@ -473,14 +559,16 @@ while true; do
             ;;
         9)
             toggle_system_wpcron "$SELECTED_DOMAIN" "$WP_PATH"
-            sleep 2
+            ;;
+        10)
+            inspect_and_test_cron
             ;;
         0)
-            echo -e "\n${GREEN}Returning to Bashboard...${NC}"
+            echo -e "\n   ${GREEN}Returning to Bashboard...${NC}"
             exit 0
             ;;
         *)
-            echo -e "\n${RED}Invalid action.${NC}"
+            echo -e "\n   ${RED}Invalid action.${NC}"
             sleep 0.8
             ;;
     esac
