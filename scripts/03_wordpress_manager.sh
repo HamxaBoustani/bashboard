@@ -169,7 +169,7 @@ wp_run() {
         echo -e "   ${RED}❌ [CRITICAL] Refusing to execute WP-CLI as non-tenant user ($u).${NC}" >&2
         return 1
     fi
-    runuser -u "$u" -s /bin/bash -- env HOME="/var/www/$SELECTED_DOMAIN" \
+    runuser -u "$u" -- env HOME="/var/www/$SELECTED_DOMAIN" \
         WP_CLI_CACHE_DIR="/var/www/$SELECTED_DOMAIN/tmp/wp-cache" \
         php -d memory_limit=512M -d error_reporting="E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE" \
         /usr/local/bin/wp --path="$WP_PATH" "$@"
