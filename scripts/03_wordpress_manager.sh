@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [03] WordPress Site Manager (Enterprise TUI Edition)
-# Version:          1.8.0 (Non-Intrusive SRE: Manual wp-config Advisory, Tenant-
-#                   Isolated 5m Cron, Single-Lock Runner, Privilege-Dropped CLI)
+# Version:          1.8.1 (Production Hardened: Native 'cli has-command' Sync,
+#                   Non-Intrusive Advisory, Single-Lock Runner, Privilege Drop)
 # Architecture:     2-Column Symmetrical TUI | Live Telemetry | Disaster Recovery
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -161,7 +161,7 @@ get_vhost_user() {
     echo "$u"
 }
 
-# C2 Hardened WP-CLI runner: Drops root privileges safely with explicit shell & env overrides
+# C2 Hardened WP-CLI runner: Drops root privileges safely with runuser
 wp_run() {
     local u
     u=$(get_vhost_user)
@@ -213,12 +213,12 @@ enforce_permissions() {
 }
 
 # ------------------------------------------------------------------------------
-# 6. CRON RUNNER ASSERTION & SCHEDULER ORCHESTRATION (Non-Intrusive Advisory)
+# 6. CRON RUNNER ASSERTION & SCHEDULER ORCHESTRATION (Standard WP-CLI Syntax)
 # ------------------------------------------------------------------------------
 ensure_cron_runner() {
     local runner="/usr/local/bin/bashboard-cron-runner"
-    if [ ! -f "$runner" ]; then
-        cat << 'EOF' > "$runner"
+    # Idempotent overwrite guarantees runner always stays in sync with bugfixes
+    cat << 'EOF' > "$runner"
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD CRON RUNNER ENGINE
@@ -241,14 +241,14 @@ LOCK_FILE="/var/www/${DOMAIN}/tmp/cron.lock"
     /usr/bin/php -d memory_limit=512M -d error_reporting='E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE' \
         /usr/local/bin/wp cron event run --due-now --path='${WP_PATH}' --quiet 2>/dev/null || true
 
-    if /usr/local/bin/wp --path='${WP_PATH}' command exists action-scheduler >/dev/null 2>&1; then
+    # Native WP-CLI check: uses official 'cli has-command' instead of invalid syntax
+    if /usr/local/bin/wp --path='${WP_PATH}' cli has-command action-scheduler >/dev/null 2>&1; then
         /usr/bin/php -d memory_limit=512M \
             /usr/local/bin/wp action-scheduler run --path='${WP_PATH}' --batch-size=100 --quiet 2>/dev/null || true
     fi
 "
 EOF
-        chmod 755 "$runner"
-    fi
+    chmod 755 "$runner"
 }
 
 toggle_system_wpcron() {
@@ -272,7 +272,7 @@ toggle_system_wpcron() {
     else
         echo -e "   Deploying isolated Linux crontab for ${YELLOW}${domain}${NC} (5-Minute Cadence)..."
 
-        # 1. Guarantee global runner binary exists
+        # 1. Guarantee global runner binary exists and is up to date
         ensure_cron_runner
 
         # 2. Calculate deterministic anti-thundering-herd delay (0-40s)
@@ -545,6 +545,7 @@ while true; do
             if wp_run db export - --add-drop-table 2>/dev/null | gzip -c > "$bkp_file"; then
                 if [[ -s "$bkp_file" ]]; then
                     chmod 600 "$bkp_file"
+                    # C6 Bug Fix: Safe top-level variable assignment without 'local' keyword
                     bkp_size=$(du -h "$bkp_file" | cut -f1)
                     echo -e "${GREEN}✅ Database backup successfully created:${NC}"
                     echo -e "   File: ${YELLOW}$bkp_file${NC} (Size: ${WHITE}$bkp_size${NC})"
