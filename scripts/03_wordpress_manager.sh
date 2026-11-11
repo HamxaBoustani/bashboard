@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [03] WordPress Site Manager (Enterprise TUI Edition)
-# Version:          1.8.1 (Production Hardened: Native 'cli has-command' Sync,
-#                   Non-Intrusive Advisory, Single-Lock Runner, Privilege Drop)
-# Architecture:     2-Column Symmetrical TUI | Live Telemetry | Disaster Recovery
+# Version:          1.8.2 (SRE Performance Tuning: Zero-Bootstrap Telemetry,
+#                   Direct Version/Maint Extraction, --skip-plugins Fast Count)
+# Architecture:     2-Column Symmetrical TUI | Instant Telemetry | Disaster Recovery
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
 set -euo pipefail
@@ -213,11 +213,10 @@ enforce_permissions() {
 }
 
 # ------------------------------------------------------------------------------
-# 6. CRON RUNNER ASSERTION & SCHEDULER ORCHESTRATION (Standard WP-CLI Syntax)
+# 6. CRON RUNNER ASSERTION & SCHEDULER ORCHESTRATION
 # ------------------------------------------------------------------------------
 ensure_cron_runner() {
     local runner="/usr/local/bin/bashboard-cron-runner"
-    # Idempotent overwrite guarantees runner always stays in sync with bugfixes
     cat << 'EOF' > "$runner"
 #!/usr/bin/env bash
 # ==============================================================================
@@ -241,7 +240,6 @@ LOCK_FILE="/var/www/${DOMAIN}/tmp/cron.lock"
     /usr/bin/php -d memory_limit=512M -d error_reporting='E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE' \
         /usr/local/bin/wp cron event run --due-now --path='${WP_PATH}' --quiet 2>/dev/null || true
 
-    # Native WP-CLI check: uses official 'cli has-command' instead of invalid syntax
     if /usr/local/bin/wp --path='${WP_PATH}' cli has-command action-scheduler >/dev/null 2>&1; then
         /usr/bin/php -d memory_limit=512M \
             /usr/local/bin/wp action-scheduler run --path='${WP_PATH}' --batch-size=100 --quiet 2>/dev/null || true
@@ -272,13 +270,10 @@ toggle_system_wpcron() {
     else
         echo -e "   Deploying isolated Linux crontab for ${YELLOW}${domain}${NC} (5-Minute Cadence)..."
 
-        # 1. Guarantee global runner binary exists and is up to date
         ensure_cron_runner
 
-        # 2. Calculate deterministic anti-thundering-herd delay (0-40s)
         local delay=$(( 16#$(echo -n "$domain" | md5sum | cut -c1-2) % 40 ))
 
-        # 3. Deploy crontab drop-in running as tenant user
         cat > "$cron_file" <<EOF
 # Bashboard Automated WP-Cron for $domain
 # Runs strictly as $vhost_user with isolated execution envelopes
@@ -295,7 +290,6 @@ EOF
         echo -e "   ${GREEN}✅ Global Runner Verified : ${WHITE}/usr/local/bin/bashboard-cron-runner${NC}"
         echo -e "   ${GREEN}✅ Linux Crontab deployed : ${CYAN}$cron_file${NC} (User: ${WHITE}$vhost_user${NC}, Delay: ${YELLOW}${delay}s${NC})"
 
-        # Non-intrusive manual advisory: Keeps wp-config.php modifications strictly in user control
         echo -e "\n   ${YELLOW}📋 MANUAL ACTION RECOMMENDED:${NC}"
         echo -e "   To disable redundant web-visitor execution, add this line to your ${CYAN}wp-config.php${NC}:"
         echo -e "   ${BOLD}${WHITE}define( 'DISABLE_WP_CRON', true );${NC}"
@@ -341,7 +335,7 @@ inspect_and_test_cron() {
 }
 
 # ------------------------------------------------------------------------------
-# 8. CONTEXTUAL SITE DASHBOARD RENDERER (Symmetrical 5x2 Matrix)
+# 8. CONTEXTUAL SITE DASHBOARD RENDERER (Fast Zero-Bootstrap Telemetry)
 # ------------------------------------------------------------------------------
 draw_site_dashboard() {
     clear
@@ -351,26 +345,34 @@ draw_site_dashboard() {
     local cron_status="${GRAY}○ Web-Triggered${NC}"
     local p_active="0"
 
-    wp_version=$(wp_run core version 2>/dev/null || echo "Needs Setup")
-    wp_version=$(echo "$wp_version" | tr -d '\r\n' | cut -c 1-15)
+    # SRE Optimization 1: Read core version from static file in < 1ms (Bypasses WP PHP Bootstrap)
+    local ver_file="$WP_PATH/wp-includes/version.php"
+    if [ -f "$ver_file" ]; then
+        wp_version=$(awk -F"'" '/\$wp_version\s*=/ {print $2}' "$ver_file" 2>/dev/null || true)
+    fi
+    [ -z "$wp_version" ] && wp_version="Unknown"
 
-    if wp_run maintenance-mode is-active >/dev/null 2>&1; then
+    # SRE Optimization 2: Check maintenance mode from physical file in < 0.1ms
+    if [ -f "$WP_PATH/.maintenance" ]; then
         maint_status="${YELLOW}● MAINTENANCE${NC}"
     fi
 
+    # Read debug status directly from config
     local cur_cfg
     cur_cfg=$(get_cfg_file)
     if [[ -n "$cur_cfg" ]] && grep -qiE "define\s*\(\s*['\"]WP_DEBUG['\"]\s*,\s*true\s*\)" "$cur_cfg" 2>/dev/null; then
         debug_status="${YELLOW}● ON (Log Only)${NC}"
     fi
 
+    # Detect crontab drop-in presence
     local cron_id
     cron_id=$(echo "$SELECTED_DOMAIN" | tr '.-' '_')
     if [ -f "/etc/cron.d/bashboard-wp-${cron_id}" ]; then
         cron_status="${GREEN}● Linux Crontab (5m)${NC}"
     fi
 
-    p_active=$(wp_run plugin list --status=active --format=count 2>/dev/null || echo "0")
+    # SRE Optimization 3: Fast count using --skip-plugins (Does not execute heavy plugin PHP code)
+    p_active=$(wp_run plugin list --status=active --format=count --skip-plugins 2>/dev/null || echo "0")
     p_active=$(echo "$p_active" | tr -dc '0-9')
     [[ -z "$p_active" ]] && p_active="0"
     local plugins_count="${p_active} Active"
@@ -446,7 +448,7 @@ while true; do
             ;;
         2)
             echo ""
-            if wp_run maintenance-mode is-active >/dev/null 2>&1; then
+            if [ -f "$WP_PATH/.maintenance" ]; then
                 wp_run maintenance-mode deactivate
                 echo -e "${GREEN}✅ Maintenance mode deactivated. Site is LIVE.${NC}"
             else
@@ -545,7 +547,6 @@ while true; do
             if wp_run db export - --add-drop-table 2>/dev/null | gzip -c > "$bkp_file"; then
                 if [[ -s "$bkp_file" ]]; then
                     chmod 600 "$bkp_file"
-                    # C6 Bug Fix: Safe top-level variable assignment without 'local' keyword
                     bkp_size=$(du -h "$bkp_file" | cut -f1)
                     echo -e "${GREEN}✅ Database backup successfully created:${NC}"
                     echo -e "   File: ${YELLOW}$bkp_file${NC} (Size: ${WHITE}$bkp_size${NC})"
