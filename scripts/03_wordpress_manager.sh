@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [03] WordPress Site Manager (Enterprise TUI Edition)
-# Version:          1.8.2 (SRE Performance Tuning: Zero-Bootstrap Telemetry,
-#                   Direct Version/Maint Extraction, --skip-plugins Fast Count)
-# Architecture:     2-Column Symmetrical TUI | Instant Telemetry | Disaster Recovery
+# Version:          1.8.3 (Production Hardened: Intelligent Loopback Diagnostics,
+#                   Native 'cli has-command', Zero-Bootstrap Instant Telemetry)
+# Architecture:     2-Column Symmetrical TUI | Live Telemetry | Disaster Recovery
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
 set -euo pipefail
@@ -217,6 +217,7 @@ enforce_permissions() {
 # ------------------------------------------------------------------------------
 ensure_cron_runner() {
     local runner="/usr/local/bin/bashboard-cron-runner"
+    # Idempotent overwrite guarantees runner always stays in sync with bugfixes
     cat << 'EOF' > "$runner"
 #!/usr/bin/env bash
 # ==============================================================================
@@ -240,6 +241,7 @@ LOCK_FILE="/var/www/${DOMAIN}/tmp/cron.lock"
     /usr/bin/php -d memory_limit=512M -d error_reporting='E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE' \
         /usr/local/bin/wp cron event run --due-now --path='${WP_PATH}' --quiet 2>/dev/null || true
 
+    # Native WP-CLI check: uses official 'cli has-command' instead of invalid syntax
     if /usr/local/bin/wp --path='${WP_PATH}' cli has-command action-scheduler >/dev/null 2>&1; then
         /usr/bin/php -d memory_limit=512M \
             /usr/local/bin/wp action-scheduler run --path='${WP_PATH}' --batch-size=100 --quiet 2>/dev/null || true
@@ -299,7 +301,7 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# 7. CRON HEALTH DIAGNOSTICS & TEST RUNNER
+# 7. CRON HEALTH DIAGNOSTICS & TEST RUNNER (Intelligent Verification)
 # ------------------------------------------------------------------------------
 inspect_and_test_cron() {
     clear
@@ -322,11 +324,25 @@ inspect_and_test_cron() {
         echo -e "   ${GREEN}✅ All scheduled hooks are up-to-date. Zero overdue events.${NC}"
     fi
 
-    echo -e "\n${BLUE}[3/3] Testing Core Loopback Engine & Cron Health...${NC}"
-    if wp_run cron test >/dev/null 2>&1; then
-        echo -e "   ${GREEN}✅ Cron engine verified healthy and responsive.${NC}"
+    echo -e "\n${BLUE}[3/3] Testing Loopback Engine & Cron Infrastructure...${NC}"
+    local cur_cfg
+    cur_cfg=$(get_cfg_file)
+
+    # 1. Evaluate DISABLE_WP_CRON state truthfully
+    if [[ -n "$cur_cfg" ]] && grep -qiE "define\s*\(\s*['\"]DISABLE_WP_CRON['\"]\s*,\s*true\s*\)" "$cur_cfg" 2>/dev/null; then
+        echo -e "   ${GREEN}● Web-spawning suppressed: (DISABLE_WP_CRON = true)${NC}"
+        echo -e "   ${GREEN}✅ Background scheduler is correctly offloaded to Linux Crontab.${NC}"
     else
-        echo -e "   ${YELLOW}⚠️  WP-Cron test hook returned non-zero response (Verify /etc/hosts loopback).${NC}"
+        echo -e "   ${GRAY}○ Web-spawning enabled: (DISABLE_WP_CRON is false/unset)${NC}"
+    fi
+
+    # 2. Test actual network loopback without triggering WP-CLI false alarms
+    local http_code
+    http_code=$(curl -s -k -o /dev/null -w "%{http_code}" "https://${SELECTED_DOMAIN}/wp-cron.php" 2>/dev/null || echo "000")
+    if [[ "$http_code" == "200" || "$http_code" == "301" ]]; then
+        echo -e "   ${GREEN}✅ Local loopback networking verified healthy (HTTP ${http_code}).${NC}"
+    else
+        echo -e "   ${YELLOW}⚠️  Loopback returned HTTP ${http_code} (Verify /etc/hosts loopback).${NC}"
     fi
 
     enforce_permissions
@@ -345,33 +361,31 @@ draw_site_dashboard() {
     local cron_status="${GRAY}○ Web-Triggered${NC}"
     local p_active="0"
 
-    # SRE Optimization 1: Read core version from static file in < 1ms (Bypasses WP PHP Bootstrap)
+    # Fast version read in < 1ms
     local ver_file="$WP_PATH/wp-includes/version.php"
     if [ -f "$ver_file" ]; then
         wp_version=$(awk -F"'" '/\$wp_version\s*=/ {print $2}' "$ver_file" 2>/dev/null || true)
     fi
     [ -z "$wp_version" ] && wp_version="Unknown"
 
-    # SRE Optimization 2: Check maintenance mode from physical file in < 0.1ms
+    # Fast maintenance check in < 0.1ms
     if [ -f "$WP_PATH/.maintenance" ]; then
         maint_status="${YELLOW}● MAINTENANCE${NC}"
     fi
 
-    # Read debug status directly from config
     local cur_cfg
     cur_cfg=$(get_cfg_file)
     if [[ -n "$cur_cfg" ]] && grep -qiE "define\s*\(\s*['\"]WP_DEBUG['\"]\s*,\s*true\s*\)" "$cur_cfg" 2>/dev/null; then
         debug_status="${YELLOW}● ON (Log Only)${NC}"
     fi
 
-    # Detect crontab drop-in presence
     local cron_id
     cron_id=$(echo "$SELECTED_DOMAIN" | tr '.-' '_')
     if [ -f "/etc/cron.d/bashboard-wp-${cron_id}" ]; then
         cron_status="${GREEN}● Linux Crontab (5m)${NC}"
     fi
 
-    # SRE Optimization 3: Fast count using --skip-plugins (Does not execute heavy plugin PHP code)
+    # Fast plugin count with --skip-plugins
     p_active=$(wp_run plugin list --status=active --format=count --skip-plugins 2>/dev/null || echo "0")
     p_active=$(echo "$p_active" | tr -dc '0-9')
     [[ -z "$p_active" ]] && p_active="0"
