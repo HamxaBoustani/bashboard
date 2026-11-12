@@ -37,7 +37,7 @@ fi
 
 if ! command -v logrotate >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq && apt-get install -y -qq logrotate || true
+    apt-get -o DPkg::Lock::Timeout=60 update -qq && apt-get -o DPkg::Lock::Timeout=60 install -y -qq logrotate || true
 fi
 
 # ------------------------------------------------------------------------------

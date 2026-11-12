@@ -446,6 +446,7 @@ catch_workers_output = yes
 ; Isolated Site Telemetry & Performance SlowLog Engine
 php_admin_value[error_log] = ${logs_dir}/php_error.log
 php_admin_flag[log_errors] = on
+php_admin_flag[expose_php] = off
 slowlog = ${logs_dir}/php_slow.log
 request_slowlog_timeout = 5s
 
@@ -972,7 +973,7 @@ issue_letsencrypt_ssl() {
     if ! command -v certbot >/dev/null 2>&1; then
         echo -e "         Installing Certbot ACME client..."
         export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq && apt-get install -y -qq certbot python3-certbot-nginx
+        apt-get -o DPkg::Lock::Timeout=60 update -qq && apt-get -o DPkg::Lock::Timeout=60 install -y -qq certbot python3-certbot-nginx
     fi
 
     local server_ips=()

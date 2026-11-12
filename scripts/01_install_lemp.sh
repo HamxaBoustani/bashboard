@@ -243,6 +243,10 @@ echo -e "${CYAN}================================================================
 
 export DEBIAN_FRONTEND=noninteractive
 
+apt-get() {
+    command apt-get -o DPkg::Lock::Timeout=60 "$@"
+}
+
 run_task() {
     local task_name="$1"
     shift

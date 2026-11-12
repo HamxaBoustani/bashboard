@@ -333,7 +333,7 @@ fi
 if [ "$APPLY_UFW" -eq 1 ]; then
     echo -e "\n${BLUE}--- [3/4] Configuring UFW Firewall with Anti-Lockout Verification ---${NC}"
     if ! command -v ufw >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq ufw
+        apt-get -o DPkg::Lock::Timeout=60 update -qq && apt-get -o DPkg::Lock::Timeout=60 install -y -qq ufw
     fi
 
     # Reset default policies
@@ -363,13 +363,13 @@ fi
 if [ "$APPLY_FAIL2BAN" -eq 1 ]; then
     echo -e "\n${BLUE}--- [4/4] Deploying Fail2Ban Intrusion Prevention System ---${NC}"
     if ! command -v fail2ban-client >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq fail2ban python3-systemd
+        apt-get -o DPkg::Lock::Timeout=60 update -qq && apt-get -o DPkg::Lock::Timeout=60 install -y -qq fail2ban python3-systemd
     fi
 
     # Auto-detect log backend for modern systemd distros (Debian 12 / Ubuntu 24.04+ lack rsyslog)
     F2B_BACKEND="auto"
     if [ ! -f "/var/log/auth.log" ] && systemctl is-active --quiet systemd-journald 2>/dev/null; then
-        apt-get install -y -qq python3-systemd >/dev/null 2>&1 || true
+        apt-get -o DPkg::Lock::Timeout=60 install -y -qq python3-systemd >/dev/null 2>&1 || true
         F2B_BACKEND="systemd"
     fi
 
