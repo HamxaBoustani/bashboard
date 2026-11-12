@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [07] Virtual Host & Tenant Purge Engine (TUI Edition)
-# Version:          1.6.2 (Zero-Defect Enterprise: Manifest-Driven DB Discovery,
-#                   C3 Process-Lock Elimination via pkill, C4 SQL Injection Guard)
+# Version:          1.7.0 (Zero-Defect Enterprise: Manifest-Driven DB Discovery,
+#                   Orphaned Certbot Reference Sanitizer, Process-Lock Termination)
 # Architecture:     Interactive TUI Configurator | Destructive Safety Guardrails
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -173,10 +173,29 @@ rm -f "/etc/nginx/sites-available/$TARGET_SITE"
 rm -f "/etc/nginx/ssl/$TARGET_SITE.crt" "/etc/nginx/ssl/$TARGET_SITE.key"
 rm -f "/etc/logrotate.d/vhost-$TARGET_SITE"
 
+# Sanitize /etc/nginx/sites-available/default if Certbot previously mutated it with this domain
+if [ -f "/etc/nginx/sites-available/default" ] && grep -qF "$TARGET_SITE" "/etc/nginx/sites-available/default" 2>/dev/null; then
+    echo -e "         Sanitizing Certbot mutations from stock default vhost..."
+    rm -f "/etc/nginx/sites-enabled/default"
+    cat > "/etc/nginx/sites-available/default" <<'EOF'
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    root /var/www/html;
+    index index.html index.htm index.nginx-debian.html;
+    server_name _;
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+EOF
+fi
+
 if command -v certbot >/dev/null 2>&1 && [ -d "/etc/letsencrypt/live/$TARGET_SITE" ]; then
     echo -e "         Purging ACME Let's Encrypt certificates..."
     certbot delete --cert-name "$TARGET_SITE" --non-interactive >/dev/null 2>&1 || true
 fi
+rm -rf "/etc/letsencrypt/live/${TARGET_SITE}"* "/etc/letsencrypt/archive/${TARGET_SITE}"* "/etc/letsencrypt/renewal/${TARGET_SITE}"*.conf 2>/dev/null || true
 
 if nginx -t >/dev/null 2>&1; then
     systemctl reload nginx

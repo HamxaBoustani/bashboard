@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [02] Nginx Virtual Host & Architecture Deployer (TUI Edition)
-# Version:          1.7.1 (CIS & OWASP Hardened: Multi-Tier Public DNS Resolver,
-#                   Post-TLS Loopback Pinning, Canonical www 301, Rate-Limit Zone)
+# Version:          1.8.0 (CIS & OWASP Hardened: Zero-Mutation Webroot ACME TLS,
+#                   Syscall-Hardened FPM Pool, Multi-Tier DNS, Post-TLS Loopback)
 # Architecture:     Interactive TUI Configurator | Commercial Hosting Standard
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -195,7 +195,7 @@ draw_vhost_tui() {
     fi
 
     local media_sub_disp="uploads.${DOMAIN:-example.com}"
-    local ssl_disp="${GREEN}Let's Encrypt (Pre-flight DNS)${NC}"
+    local ssl_disp="${GREEN}Let's Encrypt (Webroot ACME)${NC}"
     if [ "$ENABLE_LETSENCRYPT" -eq 0 ]; then
         ssl_disp="${YELLOW}Self-Signed Fallback Only${NC}"
     fi
@@ -405,9 +405,10 @@ if [[ ! -f "$cert_file" || ! -f "$key_file" ]]; then
     openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
         -keyout "$key_file" -out "$cert_file" \
         -subj "/C=US/ST=Dev/L=Infrastructure/O=Bashboard/CN=$DOMAIN" 2>/dev/null
+    chmod 600 "$key_file"
 fi
 
-# 8.3 Configure PHP-FPM Pool with Strict Sandboxing & Realpath Optimization
+# 8.3 Configure PHP-FPM Pool with Strict Sandboxing, Syscall Blocking & Realpath Optimization
 safe_max_workers=$(calculate_safe_max_children)
 
 configure_isolated_php_pool() {
@@ -454,7 +455,10 @@ php_admin_value[session.save_path] = ${tmp_dir}
 php_admin_value[sys_temp_dir] = ${tmp_dir}
 
 ; Strict File Access Jail (Eliminating global /tmp/ leakage)
-php_admin_value[open_basedir] = /var/www/${domain}/:/tmp/wp-cache-${domain}/:/dev/urandom:/usr/share/zoneinfo/
+php_admin_value[open_basedir] = /var/www/${domain}/:/dev/urandom:/usr/share/zoneinfo/
+
+; Syscall & Shell Execution Lockdown (Prevents open_basedir bypass via OS binaries)
+php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,show_source,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid
 
 ; Realpath Cache Performance Optimization (Neutralizes open_basedir I/O penalty)
 php_admin_value[realpath_cache_size] = 4096k
@@ -486,6 +490,9 @@ rebalance_all_pools
 
 # 8.4 Compile Hardened Nginx Virtual Host Configuration (OWASP & CIS Hardened)
 echo -e "   [4/8] Compiling Nginx virtual host configuration..."
+
+# Unlink default stock config if present to prevent server_name collisions
+rm -f /etc/nginx/sites-enabled/default
 
 # 1. Guarantee Global Rate-Limit Zone Exists (Prevents unknown limit_req_zone crash)
 if [ ! -f "/etc/nginx/conf.d/00-bashboard-rate-limit.conf" ]; then
@@ -521,13 +528,25 @@ else
     listen_ssl_v6="listen [::]:443 ssl http2;"
 fi
 
+http_server_names="$DOMAIN www.$DOMAIN"
+[ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ] && http_server_names="$DOMAIN www.$DOMAIN uploads.$DOMAIN"
+
 cat > "$nginx_conf" <<EOF
-# HTTP (80) -> Redirect All Requests to HTTPS Non-WWW (Clean Root Return)
+# HTTP (80) -> ACME Webroot Responder & Canonical HTTPS Redirect
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN www.$DOMAIN;
-    return 301 https://$DOMAIN\$request_uri;
+    server_name $http_server_names;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root $project_root;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+
+    location / {
+        return 301 https://$DOMAIN\$request_uri;
+    }
 }
 
 # HTTPS (443) -> Canonical Redirect: www -> non-www
@@ -660,6 +679,12 @@ server {
 
     client_max_body_size 256M;
 
+    location ^~ /.well-known/acme-challenge/ {
+        root $project_root;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+
     location / {
         try_files \$uri \$uri/ =404;
     }
@@ -725,16 +750,20 @@ setup_url="https://$DOMAIN/"
 if [ "$PAYLOAD_TYPE" == "wordpress" ]; then
     echo -e "\n   [6/8] Staging WordPress Core & Generating Direct Filesystem Config..."
 
-    rm -rf /tmp/wp-latest.zip /tmp/wordpress
-    wget -qO /tmp/wp-latest.zip https://wordpress.org/latest.zip
-    unzip -q -o /tmp/wp-latest.zip -d /tmp/
+    # Stage inside isolated tenant tmp_dir instead of world-writable /tmp
+    rm -rf "$tmp_dir/wp-latest.zip" "$tmp_dir/wordpress"
+    wget -qO "$tmp_dir/wp-latest.zip" https://wordpress.org/latest.zip
+    unzip -q -o "$tmp_dir/wp-latest.zip" -d "$tmp_dir/"
 
     # Seamless cross-filesystem merge: Preserves target directory structures
-    cp -a /tmp/wordpress/. "$project_root/"
-    rm -rf /tmp/wp-latest.zip /tmp/wordpress
+    cp -a "$tmp_dir/wordpress/." "$project_root/"
+    rm -rf "$tmp_dir/wp-latest.zip" "$tmp_dir/wordpress"
     mkdir -p "$media_root"
 
-    wp core config \
+    WP_PHP_BIN="php"
+    [[ -x "/usr/bin/php${PHP_VER}" ]] && WP_PHP_BIN="/usr/bin/php${PHP_VER}"
+
+    "$WP_PHP_BIN" /usr/local/bin/wp core config \
         --dbname="$DB_NAME" \
         --dbuser="$DB_USER" \
         --dbpass="$DB_PASS" \
@@ -845,28 +874,15 @@ chown root:root "/var/www/$DOMAIN/.bashboard-state"
 chmod 600 "/var/www/$DOMAIN/.bashboard-state"
 
 # ------------------------------------------------------------------------------
-# 12. LET'S ENCRYPT AUTOMATION ENGINE (With Multi-Tier Public DNS Validation)
+# 12. LET'S ENCRYPT AUTOMATION ENGINE (Zero-Mutation Webroot + Multi-Tier DNS)
 # ------------------------------------------------------------------------------
-# Queries public DNS resolvers directly via IP (DoH + UDP/TCP) without touching
-# /etc/hosts or local nsswitch cache.
+# Queries public DNS resolvers directly via UDP/TCP & IP-based DoH without
+# touching /etc/hosts or local nsswitch cache.
 resolve_public_ip() {
     local target_d="$1"
     local ip=""
 
-    # Tier 1: Direct IP-based DoH (Bypasses local DNS resolution & UDP port 53 blocks)
-    for doh_endpoint in \
-        "https://1.1.1.1/dns-query?name=${target_d}&type=A" \
-        "https://8.8.8.8/resolve?name=${target_d}&type=A"; do
-        ip=$(curl -4 -s --connect-timeout 3 -m 4 -H "accept: application/dns-json" "$doh_endpoint" 2>/dev/null \
-            | grep -oE '"data":"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"' \
-            | head -n1 | cut -d'"' -f4 || true)
-        if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "$ip"
-            return 0
-        fi
-    done
-
-    # Tier 2: Direct UDP/TCP query to public nameservers via dig (if available)
+    # Tier 1: Direct UDP/TCP query via dig (Fastest, natively resolves CNAME chains for www/uploads)
     if command -v dig >/dev/null 2>&1; then
         for ns in 1.1.1.1 8.8.8.8 9.9.9.9; do
             ip=$(dig +short +time=2 +tries=1 @"$ns" "$target_d" A 2>/dev/null \
@@ -877,6 +893,19 @@ resolve_public_ip() {
             fi
         done
     fi
+
+    # Tier 2: Direct IP-based DoH (Bypasses local DNS resolution & UDP port 53 blocks)
+    for doh_endpoint in \
+        "https://1.1.1.1/dns-query?name=${target_d}&type=A" \
+        "https://8.8.8.8/resolve?name=${target_d}&type=A"; do
+        ip=$(curl -4 -s --connect-timeout 3 -m 4 -H "accept: application/dns-json" "$doh_endpoint" 2>/dev/null \
+            | grep -oE '"data":"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"' \
+            | tail -n1 | cut -d'"' -f4 || true)
+        if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$ip"
+            return 0
+        fi
+    done
 
     # Tier 3: Direct query via host utility (if available)
     if command -v host >/dev/null 2>&1; then
@@ -901,7 +930,7 @@ issue_letsencrypt_ssl() {
     echo -e "\n   [8/8] Automated Let's Encrypt TLS Engine..."
 
     if ! command -v certbot >/dev/null 2>&1; then
-        echo -e "         Installing Certbot & Nginx plugin..."
+        echo -e "         Installing Certbot ACME client..."
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq && apt-get install -y -qq certbot python3-certbot-nginx
     fi
@@ -940,13 +969,46 @@ issue_letsencrypt_ssl() {
         domain_args+=("-d" "$d")
     done
 
-    echo -e "         DNS matches public server IP! Requesting official TLS certificate..."
-    if certbot --nginx --non-interactive --agree-tos \
+    mkdir -p "$project_root/.well-known/acme-challenge"
+    chown -R "$vhost_user:www-data" "$project_root/.well-known"
+    chmod -R 755 "$project_root/.well-known"
+
+    echo -e "         DNS matches public server IP! Requesting official TLS certificate (Webroot)..."
+    if certbot certonly --webroot -w "$project_root" \
+        --cert-name "$domain" \
+        --non-interactive --agree-tos \
         --email "$admin_email" \
         --no-eff-email \
+        --keep-until-expiring \
         "${domain_args[@]}" >> /var/log/bashboard_ssl.log 2>&1; then
 
-        echo -e "         ${GREEN}✅ Let's Encrypt certificate successfully deployed for: ${domains_to_cert[*]}${NC}"
+        local le_fullchain="/etc/letsencrypt/live/${domain}/fullchain.pem"
+        local le_privkey="/etc/letsencrypt/live/${domain}/privkey.pem"
+
+        if [[ -f "$le_fullchain" && -f "$le_privkey" ]]; then
+            # Cleanly swap self-signed paths with official Let's Encrypt PEMs without mutating VHost structure
+            sed -i "s|ssl_certificate[[:space:]]\+$cert_file;|ssl_certificate     $le_fullchain;|g" "$nginx_conf"
+            sed -i "s|ssl_certificate_key[[:space:]]\+$key_file;|ssl_certificate_key $le_privkey;|g" "$nginx_conf"
+
+            if nginx -t >/dev/null 2>&1; then
+                systemctl reload nginx
+                rm -f "$cert_file" "$key_file"
+                echo -e "         ${GREEN}✅ Let's Encrypt certificate cleanly bound for: ${domains_to_cert[*]}${NC}"
+            else
+                # Revert to self-signed if syntax check fails
+                sed -i "s|ssl_certificate[[:space:]]\+$le_fullchain;|ssl_certificate     $cert_file;|g" "$nginx_conf"
+                sed -i "s|ssl_certificate_key[[:space:]]\+$le_privkey;|ssl_certificate_key $key_file;|g" "$nginx_conf"
+                echo -e "         ${RED}❌ Nginx reload failed with new cert; reverted to self-signed fallback.${NC}"
+            fi
+        fi
+
+        # Guarantee automated Nginx reload upon future Certbot renewals
+        mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+        cat > /etc/letsencrypt/renewal-hooks/deploy/bashboard-nginx-reload.sh <<'EOF'
+#!/usr/bin/env bash
+nginx -t >/dev/null 2>&1 && systemctl reload nginx 2>/dev/null || true
+EOF
+        chmod 755 /etc/letsencrypt/renewal-hooks/deploy/bashboard-nginx-reload.sh
         systemctl enable --now certbot.timer >/dev/null 2>&1 || true
     else
         echo -e "         ${RED}❌ Certbot issuance failed! Check /var/log/bashboard_ssl.log for details.${NC}"
@@ -985,7 +1047,7 @@ echo -e "Canonical Redirect:    ${WHITE}https://www.$DOMAIN -> https://$DOMAIN (
 echo -e "Payload Architecture:  ${WHITE}$( [ "$PAYLOAD_TYPE" == "wordpress" ] && echo "Standard WordPress" || echo "Blank Site" )${NC}"
 echo -e "Isolated Tenant User:  ${CYAN}${vhost_user}${NC} (Isolated Parent 750 / C1 Hardened 600)"
 echo -e "Temp & Session Sandbox:${WHITE}$tmp_dir${NC} ${GREEN}(chmod 700 / sys_temp_dir)${NC}"
-echo -e "PHP-FPM Worker Ceiling:${WHITE}${safe_max_workers} Workers${NC} ${GREEN}(Rebalanced & OOM Protected)${NC}"
+echo -e "PHP-FPM Worker Ceiling:${WHITE}${safe_max_workers} Workers${NC} ${GREEN}(Rebalanced & Syscall Locked)${NC}"
 echo -e "Security Hardening:    ${GREEN}Brute-Force Rate Limiting Active (/wp-login.php)${NC}"
 echo -e "Dedicated Logrotate:   ${WHITE}/etc/logrotate.d/vhost-$DOMAIN${NC} ${GREEN}(Deadlock Free)${NC}"
 echo -e "Web Setup Entrypoint:  ${CYAN}$setup_url${NC}"

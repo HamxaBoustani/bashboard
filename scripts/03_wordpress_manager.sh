@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [03] WordPress Site Manager (Enterprise TUI Edition)
-# Version:          1.8.3 (Production Hardened: Intelligent Loopback Diagnostics,
-#                   Native 'cli has-command', Zero-Bootstrap Instant Telemetry)
+# Version:          1.9.0 (Production Hardened: Multi-PHP CLI Binary Pinning,
+#                   Automated DISABLE_WP_CRON Sync, Intelligent Loopback Checks)
 # Architecture:     2-Column Symmetrical TUI | Live Telemetry | Disaster Recovery
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -137,7 +137,7 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# 5. ENVIRONMENT PATH RESOLUTION & SAFE RUNNERS
+# 5. ENVIRONMENT PATH RESOLUTION, PHP PINNING & SAFE RUNNERS
 # ------------------------------------------------------------------------------
 TARGET_DIR="/var/www/$SELECTED_DOMAIN/public_html"
 [[ ! -d "$TARGET_DIR" ]] && TARGET_DIR="/var/www/$SELECTED_DOMAIN"
@@ -152,7 +152,10 @@ fi
 
 get_vhost_user() {
     local u=""
-    if [ -d "$TARGET_DIR" ]; then
+    if [ -f "/var/www/$SELECTED_DOMAIN/.bashboard-state" ]; then
+        u=$(grep -E "^TENANT_USER=" "/var/www/$SELECTED_DOMAIN/.bashboard-state" 2>/dev/null | cut -d'=' -f2- || true)
+    fi
+    if [[ -z "$u" ]] && [ -d "$TARGET_DIR" ]; then
         u=$(stat -c '%U' "$TARGET_DIR" 2>/dev/null || true)
     fi
     if [[ -z "$u" || "$u" == "root" ]]; then
@@ -161,7 +164,26 @@ get_vhost_user() {
     echo "$u"
 }
 
-# C2 Hardened WP-CLI runner: Drops root privileges safely with runuser
+# Resolves the exact PHP CLI binary matching the site's dedicated FPM pool
+get_site_php_bin() {
+    local ver=""
+    local state_file="/var/www/$SELECTED_DOMAIN/.bashboard-state"
+    if [ -f "$state_file" ]; then
+        ver=$(grep -E "^PHP_VER=" "$state_file" 2>/dev/null | cut -d'=' -f2- || true)
+    fi
+    if [[ -z "$ver" ]] && [ -f "/etc/nginx/sites-available/$SELECTED_DOMAIN" ]; then
+        ver=$(grep -oE 'php[0-9]+\.[0-9]+-fpm' "/etc/nginx/sites-available/$SELECTED_DOMAIN" 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+' || true)
+    fi
+    if [[ -n "$ver" && -x "/usr/bin/php${ver}" ]]; then
+        echo "/usr/bin/php${ver}"
+    else
+        command -v php 2>/dev/null || echo "/usr/bin/php"
+    fi
+}
+
+SITE_PHP_BIN=$(get_site_php_bin)
+
+# C2 Hardened WP-CLI runner: Drops root privileges safely with runuser & exact PHP version
 wp_run() {
     local u
     u=$(get_vhost_user)
@@ -171,7 +193,7 @@ wp_run() {
     fi
     runuser -u "$u" -- env HOME="/var/www/$SELECTED_DOMAIN" \
         WP_CLI_CACHE_DIR="/var/www/$SELECTED_DOMAIN/tmp/wp-cache" \
-        php -d memory_limit=512M -d error_reporting="E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE" \
+        "$SITE_PHP_BIN" -d memory_limit=512M -d error_reporting="E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE" \
         /usr/local/bin/wp --path="$WP_PATH" "$@"
 }
 
@@ -217,12 +239,12 @@ enforce_permissions() {
 # ------------------------------------------------------------------------------
 ensure_cron_runner() {
     local runner="/usr/local/bin/bashboard-cron-runner"
-    # Idempotent overwrite guarantees runner always stays in sync with bugfixes
+    # Idempotent overwrite guarantees runner always stays in sync with multi-PHP resolution
     cat << 'EOF' > "$runner"
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD CRON RUNNER ENGINE
-# Architecture: Single Lock Capsule, Memory Guard (512M), Action Scheduler Sync
+# Architecture: Single Lock Capsule, Multi-PHP Aware, Action Scheduler Sync
 # ==============================================================================
 set -e
 
@@ -234,16 +256,25 @@ if [[ -z "$DOMAIN" || -z "$WP_PATH" ]]; then
     exit 1
 fi
 
+PHP_BIN="/usr/bin/php"
+STATE_FILE="/var/www/${DOMAIN}/.bashboard-state"
+if [ -f "$STATE_FILE" ]; then
+    VER=$(grep -E "^PHP_VER=" "$STATE_FILE" 2>/dev/null | cut -d'=' -f2- || true)
+    if [[ -n "$VER" && -x "/usr/bin/php${VER}" ]]; then
+        PHP_BIN="/usr/bin/php${VER}"
+    fi
+fi
+
 LOCK_FILE="/var/www/${DOMAIN}/tmp/cron.lock"
 
 # Execute inside a single atomic flock capsule to eliminate overlaps
 /usr/bin/flock -n "${LOCK_FILE}" -c "
-    /usr/bin/php -d memory_limit=512M -d error_reporting='E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE' \
+    \"${PHP_BIN}\" -d memory_limit=512M -d error_reporting='E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE' \
         /usr/local/bin/wp cron event run --due-now --path='${WP_PATH}' --quiet 2>/dev/null || true
 
-    # Native WP-CLI check: uses official 'cli has-command' instead of invalid syntax
-    if /usr/local/bin/wp --path='${WP_PATH}' cli has-command action-scheduler >/dev/null 2>&1; then
-        /usr/bin/php -d memory_limit=512M \
+    # Native WP-CLI check: uses official 'cli has-command'
+    if \"${PHP_BIN}\" /usr/local/bin/wp --path='${WP_PATH}' cli has-command action-scheduler >/dev/null 2>&1; then
+        \"${PHP_BIN}\" -d memory_limit=512M \
             /usr/local/bin/wp action-scheduler run --path='${WP_PATH}' --batch-size=100 --quiet 2>/dev/null || true
     fi
 "
@@ -265,10 +296,10 @@ toggle_system_wpcron() {
     if [ -f "$cron_file" ]; then
         echo -e "   Disabling Linux Crontab for ${YELLOW}${domain}${NC}..."
         rm -f "$cron_file"
+        wp_run config set DISABLE_WP_CRON false --raw --skip-plugins --skip-themes >/dev/null 2>&1 || true
         enforce_permissions
         echo -e "   ${YELLOW}● Crontab removed: ${cron_file}${NC}"
-        echo -e "\n   ${CYAN}ℹ️  ADVISORY:${NC} If you manually added ${WHITE}define( 'DISABLE_WP_CRON', true );${NC} in ${YELLOW}wp-config.php${NC},"
-        echo -e "   you can now remove it or set it to ${WHITE}false${NC} to restore web visitor triggers."
+        echo -e "   ${GREEN}✅ Restored web-triggered WP-Cron (DISABLE_WP_CRON = false).${NC}"
     else
         echo -e "   Deploying isolated Linux crontab for ${YELLOW}${domain}${NC} (5-Minute Cadence)..."
 
@@ -287,14 +318,12 @@ WP_CLI_CACHE_DIR=/var/www/$domain/tmp/wp-cache
 */5 * * * * $vhost_user sleep $delay; /usr/local/bin/bashboard-cron-runner $domain $wp_path >/dev/null 2>&1 || true
 EOF
         chmod 644 "$cron_file"
+        wp_run config set DISABLE_WP_CRON true --raw --skip-plugins --skip-themes >/dev/null 2>&1 || true
         enforce_permissions
 
-        echo -e "   ${GREEN}✅ Global Runner Verified : ${WHITE}/usr/local/bin/bashboard-cron-runner${NC}"
+        echo -e "   ${GREEN}✅ Global Runner Verified : ${WHITE}/usr/local/bin/bashboard-cron-runner${NC} (${SITE_PHP_BIN})"
         echo -e "   ${GREEN}✅ Linux Crontab deployed : ${CYAN}$cron_file${NC} (User: ${WHITE}$vhost_user${NC}, Delay: ${YELLOW}${delay}s${NC})"
-
-        echo -e "\n   ${YELLOW}📋 MANUAL ACTION RECOMMENDED:${NC}"
-        echo -e "   To disable redundant web-visitor execution, add this line to your ${CYAN}wp-config.php${NC}:"
-        echo -e "   ${BOLD}${WHITE}define( 'DISABLE_WP_CRON', true );${NC}"
+        echo -e "   ${GREEN}✅ Web-spawning disabled  : ${WHITE}DISABLE_WP_CRON = true${NC} synced in wp-config.php"
     fi
     echo ""
     read -rp "Press Enter to return to site dashboard..."
@@ -307,7 +336,7 @@ inspect_and_test_cron() {
     clear
     echo -e "${CYAN}==================================================================${NC}"
     echo -e "   🩺 ${BOLD}${WHITE}WordPress Cron Health & Diagnostics Suite${NC}"
-    echo -e "   Site: ${YELLOW}$SELECTED_DOMAIN${NC}"
+    echo -e "   Site: ${YELLOW}$SELECTED_DOMAIN${NC} (Runtime: ${CYAN}$SITE_PHP_BIN${NC})"
     echo -e "${CYAN}==================================================================${NC}\n"
 
     echo -e "${BLUE}[1/3] Inspecting Scheduled Event Table & Next Execution Windows...${NC}"
@@ -559,7 +588,7 @@ while true; do
             echo -e "\n${BLUE}Exporting and compressing MySQL database (Gzip)...${NC}"
 
             if wp_run db export - --add-drop-table 2>/dev/null | gzip -c > "$bkp_file"; then
-                if [[ -s "$bkp_file" ]]; then
+                if [ -f "$bkp_file" ] && [ "$(stat -c '%s' "$bkp_file" 2>/dev/null || echo 0)" -gt 64 ]; then
                     chmod 600 "$bkp_file"
                     bkp_size=$(du -h "$bkp_file" | cut -f1)
                     echo -e "${GREEN}✅ Database backup successfully created:${NC}"
@@ -569,6 +598,7 @@ while true; do
                     echo -e "${RED}❌ [ERROR] Exported database dump is empty.${NC}"
                 fi
             else
+                rm -f "$bkp_file"
                 echo -e "${RED}❌ [ERROR] Database export operation failed.${NC}"
             fi
             read -rp "Press Enter to continue..."

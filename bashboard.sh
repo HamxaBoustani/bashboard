@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD - Enterprise VPS Management System
-# Version:      1.6.4 (Production Hardened: Dual SSL Sensor, 60s Balanced Polling,
-#               True Status Sensors, Safe /proc Parser, Child Lock Isolation)
+# Version:      1.6.5 (Production Hardened: Auto-Refresh Static Cache Post-Task,
+#               First-Match SSH Sensor Sync, Dual SSL Sensor, Safe /proc Parser)
 # Architecture: Multi-Tier | Active Caching | 100% Absolute Column Alignment
 # Platform:     Linux (Ubuntu 22.04/24.04 LTS, Debian 11/12)
 # ==============================================================================
@@ -121,7 +121,7 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# 4. SRE CACHING LAYER & STATUS-ACCURATE WRAPPERS (C7 Resolved)
+# 4. SRE CACHING LAYER & STATUS-ACCURATE WRAPPERS
 # ------------------------------------------------------------------------------
 safe_cmd() {
     local cmd="$1"
@@ -138,7 +138,10 @@ safe_cmd() {
 }
 
 get_static_info() {
-    echo -e "${YELLOW}Gathering system footprint, please wait...${NC}"
+    local quiet_mode="${1:-}"
+    if [[ "$quiet_mode" != "--quiet" ]]; then
+        echo -e "${YELLOW}Gathering system footprint, please wait...${NC}"
+    fi
 
     OS=$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo "Unknown Linux")
     KERNEL=$(safe_cmd uname -r 2>/dev/null || echo "Unknown")
@@ -164,35 +167,37 @@ get_static_info() {
         DISK_TYPE="HDD"
     fi
 
-    PUBLIC_IP="Resolving..."
-    [ -L "$IP_CACHE_FILE" ] && rm -f "$IP_CACHE_FILE" 2>/dev/null || true
-    if command -v curl >/dev/null 2>&1; then
-        (
-            _ip=""
-            for _url in "https://api.ipify.org" "https://ifconfig.me" "https://icanhazip.com"; do
-                _ip=$(curl -4 -s --connect-timeout 2 --max-time 2 "$_url" 2>/dev/null || true)
-                _ip=$(tr -d '[:space:]' <<< "$_ip")
-                if [[ "$_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [[ ! -f "$IP_CACHE_FILE" ]]; then
+        PUBLIC_IP="Resolving..."
+        [ -L "$IP_CACHE_FILE" ] && rm -f "$IP_CACHE_FILE" 2>/dev/null || true
+        if command -v curl >/dev/null 2>&1; then
+            (
+                _ip=""
+                for _url in "https://api.ipify.org" "https://ifconfig.me" "https://icanhazip.com"; do
+                    _ip=$(curl -4 -s --connect-timeout 2 --max-time 2 "$_url" 2>/dev/null || true)
+                    _ip=$(tr -d '[:space:]' <<< "$_ip")
+                    if [[ "$_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                        (
+                            umask 022
+                            echo "$_ip" > "${IP_CACHE_FILE}.tmp"
+                            mv -f "${IP_CACHE_FILE}.tmp" "$IP_CACHE_FILE"
+                        ) 2>/dev/null || true
+                        break
+                    fi
+                done
+                if [[ ! "$_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
                     (
                         umask 022
-                        echo "$_ip" > "${IP_CACHE_FILE}.tmp"
+                        echo "Blocked/Fail" > "${IP_CACHE_FILE}.tmp"
                         mv -f "${IP_CACHE_FILE}.tmp" "$IP_CACHE_FILE"
                     ) 2>/dev/null || true
-                    break
                 fi
-            done
-            if [[ ! "$_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                (
-                    umask 022
-                    echo "Blocked/Fail" > "${IP_CACHE_FILE}.tmp"
-                    mv -f "${IP_CACHE_FILE}.tmp" "$IP_CACHE_FILE"
-                ) 2>/dev/null || true
-            fi
-        ) &
-        disown 2>/dev/null || true
-    else
-        PUBLIC_IP="Curl missing"
-        (umask 022; echo "Curl missing" > "$IP_CACHE_FILE" 2>/dev/null) || true
+            ) &
+            disown 2>/dev/null || true
+        else
+            PUBLIC_IP="Curl missing"
+            (umask 022; echo "Curl missing" > "$IP_CACHE_FILE" 2>/dev/null) || true
+        fi
     fi
 
     LOCAL_IP=$(safe_cmd hostname -I 2>/dev/null | awk '{print $1}' || echo "Unavailable")
@@ -247,7 +252,7 @@ get_static_info() {
 # 5. DYNAMIC REAL-TIME POLLING
 # ------------------------------------------------------------------------------
 get_cpu_usage() {
-    local u1 n1 s1 i1 io1 ir1 sir1 st1 _ u2 n2 s2 i2 io2 ir2 sir2 st2 _
+    local u1 n1 s1 i1 io1 ir1 sir1 st1 _ u2 n2 s2 i2 io2 ir1 sir2 st2 _
     read -r _ u1 n1 s1 i1 io1 ir1 sir1 st1 _ < /proc/stat || true
     sleep 0.1
     read -r _ u2 n2 s2 i2 io2 ir2 sir2 st2 _ < /proc/stat || true
@@ -546,7 +551,8 @@ draw_dashboard() {
         ssh_permit=$(sshd -T 2>/dev/null | awk '/^permitrootlogin/ {print tolower($2)}' || true)
     fi
     if [ -z "$ssh_permit" ]; then
-        ssh_permit=$(grep -rshiE '^\s*PermitRootLogin\s+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | tail -n1 | awk '{print tolower($2)}' || true)
+        # Aligned with OpenSSH First-Match-Wins precedence (head -n1)
+        ssh_permit=$(grep -rshiE '^\s*PermitRootLogin\s+' /etc/ssh/sshd_config.d/*.conf /etc/ssh/sshd_config 2>/dev/null | head -n1 | awk '{print tolower($2)}' || true)
     fi
 
     if [ "$ssh_permit" = "no" ]; then
@@ -568,14 +574,18 @@ draw_dashboard() {
     local S_CRON=$(check_daemon cron "" "cron crond")
 
     local S_BKP="${GRAY}○ NOT CONFIGURED${NC}"
-    if command -v rclone >/dev/null 2>&1 && [ -f "$HOME/.config/rclone/rclone.conf" ]; then
-        S_BKP="${GREEN}● GDrive Configured${NC}"
+    if command -v rclone >/dev/null 2>&1 && safe_cmd rclone listremotes 2>/dev/null | grep -qx "bashboard-gdrive:"; then
+        if [ -f "/etc/cron.d/bashboard-gdrive-backup" ]; then
+            S_BKP="${GREEN}● GDrive (Nightly 03:00)${NC}"
+        else
+            S_BKP="${YELLOW}● GDrive (Manual Only)${NC}"
+        fi
     fi
 
     local r_fmt="      %-16s: ${WHITE}%-21s${NC}${COL_MID}${GRAY}│${NC} %-16s: ${WHITE}%-20s${NC}\n"
 
     echo -e "${CYAN}┌────────────────────────────────────────────────────────────────────────────────────────────┐${NC}"
-    printf "   🚀 ${BOLD}${WHITE}%-50s${NC}    ${GREEN}Server Time: %-20s${NC}\n" "BASHBOARD (V1.6.2)" "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf "   🚀 ${BOLD}${WHITE}%-50s${NC}    ${GREEN}Server Time: %-20s${NC}\n" "BASHBOARD (V1.6.5)" "$(date '+%Y-%m-%d %H:%M:%S')"
     echo -e "${CYAN}├────────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
 
     echo -e "   📋 ${PURPLE}${BOLD}SERVER INFORMATION${NC}"
@@ -664,6 +674,7 @@ while true; do
             exit 0
             ;;
         91)
+            get_static_info --quiet
             continue
             ;;
         94)
@@ -731,6 +742,9 @@ while true; do
                         echo -e "\n${RED}Error: Module exited with status ${exit_code}.${NC}"
                         log_action "FAIL" "Module $module_file returned error (Code: $exit_code)."
                     fi
+
+                    # Refresh static system footprint in case module installed/updated binaries
+                    get_static_info --quiet
 
                     echo -ne "\n${GRAY}Press Enter to return to Bashboard...${NC}"
                     read -r || true

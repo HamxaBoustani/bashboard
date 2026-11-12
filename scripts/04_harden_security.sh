@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [04] Enterprise Security Hardening (TUI Edition)
-# Version:          0.9.3 (Production Hardened: Anti-Lockout Sudoer Sentinel,
-#                   Journald-Aware Fail2Ban, First-Match SSH Priority, Loose RP)
+# Version:          1.0.0 (Production Hardened: Anti-Lockout Sudoer Sentinel,
+#                   Ubuntu 24.04+ ssh.socket & /run/sshd Guard, python3-systemd)
 # Architecture:     Interactive DevSecOps Panel | Zero-Lockout | CIS Aligned
-# Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04 LTS
+# Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
 set -euo pipefail
 
@@ -38,9 +38,10 @@ fi
 # ------------------------------------------------------------------------------
 # 2. RUNTIME TELEMETRY & ANTI-LOCKOUT HELPERS
 # ------------------------------------------------------------------------------
-# Authoritative SSH port detection supporting systemd socket-activation (Ubuntu 24.04)
+# Authoritative SSH port detection supporting systemd socket-activation (Ubuntu 24.04+)
 detect_ssh_port() {
     local port=""
+    mkdir -p -m 0755 /run/sshd 2>/dev/null || true
     if command -v sshd >/dev/null 2>&1; then
         port=$(sshd -T 2>/dev/null | awk '/^port / {print $2}' | head -n1 || true)
     fi
@@ -60,7 +61,7 @@ has_active_sudoer() {
     local u sh
     for u in $(getent group sudo 2>/dev/null | awk -F: '{print $4}' | tr ',' ' ') \
              $(getent group wheel 2>/dev/null | awk -F: '{print $4}' | tr ',' ' '); do
-        if [ -n "$u" ] && id -u "$u" >/dev/null 2>&1; then
+        if [ -n "$u" ] && [ "$u" != "root" ] && id -u "$u" >/dev/null 2>&1; then
             sh=$(getent passwd "$u" | cut -d: -f7)
             if [[ "$sh" != "/bin/false" && "$sh" != "/usr/sbin/nologin" && "$sh" != "/sbin/nologin" ]]; then
                 return 0
@@ -70,14 +71,29 @@ has_active_sudoer() {
     return 1
 }
 
+get_current_ssh_policy() {
+    local policy=""
+    mkdir -p -m 0755 /run/sshd 2>/dev/null || true
+    if command -v sshd >/dev/null 2>&1; then
+        policy=$(sshd -T 2>/dev/null | awk '/^permitrootlogin/ {print tolower($2)}' || true)
+    fi
+    if [ -z "$policy" ]; then
+        policy=$(grep -rshiE '^\s*PermitRootLogin\s+' /etc/ssh/sshd_config.d/*.conf /etc/ssh/sshd_config 2>/dev/null | head -n1 | awk '{print tolower($2)}' || true)
+    fi
+    echo "$policy"
+}
+
 # Default configuration states
 APPLY_SYSCTL=1
 APPLY_SSH=1
 APPLY_UFW=1
 APPLY_FAIL2BAN=1
 
-# SSH Root Policy: 'prohibit-password' (Safe default: keys only) vs 'no' (Strict: sudoer required)
+# Preserve existing strict 'no' policy if already active and safe; otherwise default to 'prohibit-password'
 SSH_ROOT_POLICY="prohibit-password"
+if [[ "$(get_current_ssh_policy)" == "no" ]] && has_active_sudoer; then
+    SSH_ROOT_POLICY="no"
+fi
 
 toggle_status() {
     local val="$1"
@@ -109,15 +125,9 @@ audit_fail2ban() {
     fi
 }
 
-# Query runtime OpenSSH configuration directly rather than inspecting raw flat files
 audit_ssh_root() {
-    local policy=""
-    if command -v sshd >/dev/null 2>&1; then
-        policy=$(sshd -T 2>/dev/null | awk '/^permitrootlogin/ {print tolower($2)}' || true)
-    fi
-    if [ -z "$policy" ]; then
-        policy=$(grep -rshiE '^\s*PermitRootLogin\s+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | head -n1 | awk '{print tolower($2)}' || true)
-    fi
+    local policy
+    policy=$(get_current_ssh_policy)
 
     case "$policy" in
         no) echo -e "${GREEN}● HARDENED (No Root)${NC}" ;;
@@ -279,6 +289,12 @@ if [ "$APPLY_SSH" -eq 1 ]; then
     echo -e "\n${BLUE}--- [2/4] Securing OpenSSH Daemon Configuration ---${NC}"
     SSH_DROPIN_DIR="/etc/ssh/sshd_config.d"
     mkdir -p "$SSH_DROPIN_DIR"
+    mkdir -p -m 0755 /run/sshd 2>/dev/null || true
+
+    # Final safety verification before writing 'no'
+    if [ "$SSH_ROOT_POLICY" == "no" ] && ! has_active_sudoer; then
+        SSH_ROOT_POLICY="prohibit-password"
+    fi
 
     # Named '00-' to guarantee execution ahead of cloud-init (e.g., 50-cloud-init.conf)
     SSHD_HARDENING_FILE="$SSH_DROPIN_DIR/00-bashboard-hardening.conf"
@@ -296,11 +312,13 @@ EOF
 
     # Validate syntax before triggering any service reload to prevent lockouts
     if sshd -t >/dev/null 2>&1; then
-        # Safe reload preferred over aggressive restart to preserve established sessions
+        systemctl daemon-reload 2>/dev/null || true
         if systemctl is-active --quiet ssh 2>/dev/null; then
-            systemctl reload ssh 2>/dev/null || systemctl restart ssh 2>/dev/null
+            systemctl reload ssh 2>/dev/null || systemctl restart ssh 2>/dev/null || true
         elif systemctl is-active --quiet sshd 2>/dev/null; then
-            systemctl reload sshd 2>/dev/null || systemctl restart sshd 2>/dev/null
+            systemctl reload sshd 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+        elif systemctl is-active --quiet ssh.socket 2>/dev/null; then
+            systemctl reload-or-restart ssh.socket 2>/dev/null || true
         fi
         echo -e "   ${GREEN}✅ OpenSSH daemon secured with policy: ${YELLOW}${SSH_ROOT_POLICY}${NC}"
     else
@@ -340,17 +358,18 @@ if [ "$APPLY_UFW" -eq 1 ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 6.4 FAIL2BAN INTRUSION PREVENTION (Journald Aware)
+# 6.4 FAIL2BAN INTRUSION PREVENTION (Journald & python3-systemd Aware)
 # ------------------------------------------------------------------------------
 if [ "$APPLY_FAIL2BAN" -eq 1 ]; then
     echo -e "\n${BLUE}--- [4/4] Deploying Fail2Ban Intrusion Prevention System ---${NC}"
     if ! command -v fail2ban-client >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq fail2ban
+        apt-get update -qq && apt-get install -y -qq fail2ban python3-systemd
     fi
 
-    # Auto-detect log backend for modern systemd distros (Debian 12 / Ubuntu 24.04 lack rsyslog)
+    # Auto-detect log backend for modern systemd distros (Debian 12 / Ubuntu 24.04+ lack rsyslog)
     F2B_BACKEND="auto"
     if [ ! -f "/var/log/auth.log" ] && systemctl is-active --quiet systemd-journald 2>/dev/null; then
+        apt-get install -y -qq python3-systemd >/dev/null 2>&1 || true
         F2B_BACKEND="systemd"
     fi
 

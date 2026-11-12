@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [01] Enterprise LEMP Stack Interactive TUI Installer
-# Version:          1.0.0 (Production Hardened: Dual-OS Sury/PPA Engine, Cloudflare
-#                   Real-IP Ingestion, Global Rate-Limit Zone, Non-Destructive MariaDB)
+# Version:          1.1.0 (Production Hardened: Dual-OS Sury/PPA Engine, Default
+#                   VHost Unlink, Dual-Auth MariaDB Socket+Pass, DNS Utilities)
 # Architecture:     Interactive TUI | Dynamic Discovery | Global Infrastructure Base
 # Platform:         Debian 11/12 (Bullseye/Bookworm), Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -164,7 +164,7 @@ draw_tui() {
     printf "      %-22s: ${YELLOW}%-22s${NC}${COL_MID}${GRAY}│${NC} Change with: ${CYAN}[6]${NC}\n" "Target PHP Version" "v${PHP_VER} $([[ ",$SYSTEM_PHPS," == *",$PHP_VER,"* ]] && echo "(Installed)")"
     
     local db_pass_disp="Auto-Socket (Preserved)"
-    if [ -n "$DB_ROOT_PASS" ]; then db_pass_disp="Configured (Custom)"; fi
+    if [ -n "$DB_ROOT_PASS" ]; then db_pass_disp="Dual (Socket + Pass)"; fi
     printf "      %-22s: ${YELLOW}%-22s${NC}${COL_MID}${GRAY}│${NC} Change with: ${CYAN}[7]${NC}\n" "MariaDB Root Pass" "$db_pass_disp"
     echo -e "${CYAN}├────────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
     
@@ -201,7 +201,7 @@ while true; do
             ;;
         7)
             echo ""
-            read -rsp "   Set MariaDB Root Password (leave blank for unix_socket): " user_db_pass
+            read -rsp "   Set MariaDB Root Password (leave blank for unix_socket only): " user_db_pass
             echo ""
             DB_ROOT_PASS="$user_db_pass"
             ;;
@@ -252,8 +252,8 @@ run_task() {
 }
 
 run_task "Updating APT package index" apt-get update -y
-run_task "Installing base build dependencies" apt-get install -y --no-install-recommends \
-    software-properties-common curl wget gnupg2 ca-certificates lsb-release ufw unzip
+run_task "Installing base build & DNS utilities" apt-get install -y --no-install-recommends \
+    software-properties-common curl wget gnupg2 ca-certificates lsb-release ufw unzip dnsutils
 
 # ------------------------------------------------------------------------------
 # 8. COMPONENT 1: NGINX WEBSERVER & GLOBAL CLOUDFLARE/SECURITY PRIMITIVES
@@ -264,6 +264,9 @@ if [ "$INSTALL_NGINX" -eq 1 ]; then
     run_task "Enabling and starting Nginx daemon" systemctl enable --now nginx
 
     mkdir -p /etc/nginx/snippets /etc/nginx/ssl /etc/nginx/conf.d
+
+    # Remove default stock symlink to prevent Certbot --nginx parser collisions
+    rm -f /etc/nginx/sites-enabled/default
 
     # 8.1 Standard FastCGI snippet
     if [ ! -f "/etc/nginx/snippets/fastcgi-php.conf" ]; then
@@ -364,8 +367,9 @@ FLUSH PRIVILEGES;
 EOSQL
 
     if [ -n "$DB_ROOT_PASS" ]; then
-        run_task "Setting MariaDB root administrative credentials" \
-            $DB_CMD -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}'; FLUSH PRIVILEGES;"
+        # Preserve unix_socket alongside password so headless root scripts (backups/VHost) never break
+        run_task "Setting MariaDB root credentials (preserving unix_socket)" \
+            $DB_CMD -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket OR mysql_native_password USING PASSWORD('${DB_ROOT_PASS}'); FLUSH PRIVILEGES;"
     else
         echo -e "   ${GRAY}MariaDB root left with native unix_socket authentication (Secure).${NC}"
     fi

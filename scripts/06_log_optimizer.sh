@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [06] Enterprise Log Rotation & Disk Space Optimizer
-# Version:          1.6.1 (Production Hardened: C6 Top-Level Local Crash Elimination,
-#                   Per-VHost Drop-ins, Zero-Log-Drop Nginx Move, FPM Copytruncate)
+# Version:          1.7.0 (Production Hardened: State-Manifest Tenant Lookup,
+#                   Orphaned Drop-in Sanitizer, Journal Vacuum, Zero-Log-Drop)
 # Architecture:     Multi-Layer Log Rotation | Journal Vacuum | Zero-Crash SRE
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -203,7 +203,19 @@ if [ "$OPTIMIZE_VHOSTS" -eq 1 ]; then
 
     rm -f "/etc/logrotate.d/bashboard-vhosts"
 
-    # C6 Bug Fix: Removed 'local' outside of function scope
+    # 1. Purge orphaned logrotate drop-ins for manually deleted sites
+    shopt -s nullglob
+    existing_dropins=( /etc/logrotate.d/vhost-* )
+    shopt -u nullglob
+    for dropin in "${existing_dropins[@]}"; do
+        d_name=$(basename "$dropin" | sed 's/^vhost-//')
+        if [ ! -d "/var/www/$d_name/logs" ]; then
+            rm -f "$dropin"
+            echo -e "   ${YELLOW}🗑️  Purged orphaned logrotate drop-in:${NC} $dropin"
+        fi
+    done
+
+    # 2. Synchronize active virtual host logrotate policies
     shopt -s nullglob
     domains=( /var/www/* )
     shopt -u nullglob
@@ -211,14 +223,24 @@ if [ "$OPTIMIZE_VHOSTS" -eq 1 ]; then
     for d in "${domains[@]}"; do
         if [ -d "$d/logs" ]; then
             domain_name=$(basename "$d")
-            vhost_user=$(stat -c '%U' "$d/public_html" 2>/dev/null || stat -c '%U' "$d" 2>/dev/null || echo "www-data")
-            logs_dir="$d/logs"
+            vhost_user=""
 
+            if [ -f "$d/.bashboard-state" ]; then
+                vhost_user=$(grep -E "^TENANT_USER=" "$d/.bashboard-state" 2>/dev/null | cut -d'=' -f2- || true)
+            fi
+            if [[ -z "$vhost_user" ]] || ! id -u "$vhost_user" >/dev/null 2>&1; then
+                vhost_user=$(stat -c '%U' "$d/public_html" 2>/dev/null || stat -c '%U' "$d" 2>/dev/null || echo "www-data")
+            fi
+            if ! id -u "$vhost_user" >/dev/null 2>&1 || [[ "$vhost_user" == "root" ]]; then
+                vhost_user="www-data"
+            fi
+
+            logs_dir="$d/logs"
             chown -R "$vhost_user:www-data" "$logs_dir" 2>/dev/null || true
             chmod 770 "$logs_dir" 2>/dev/null || true
 
             cat > "/etc/logrotate.d/vhost-$domain_name" <<EOF
-# Dedicated Logrotate Policy for $domain_name
+# Bashboard Dedicated Logrotate Policy for $domain_name
 $logs_dir/*access.log $logs_dir/*error.log {
     su $vhost_user www-data
     ${ROTATE_FREQUENCY}
@@ -278,16 +300,15 @@ if [ "$VACUUM_IMMEDIATE" -eq 1 ]; then
 
     if command -v journalctl >/dev/null 2>&1; then
         echo -e "   ${GRAY}Vacuuming systemd-journal logs down to ${JOURNAL_CAP_MB}MB...${NC}"
-        journalctl --vacuum-size="${JOURNAL_CAP_MB}M" 2>/dev/null || true
+        journalctl --vacuum-size="${JOURNAL_CAP_MB}M" >/dev/null 2>&1 || true
     fi
 
-    # C6 Bug Fix: Removed 'local' outside of function scope
     shopt -s nullglob
     vhost_rotates=( /etc/logrotate.d/vhost-* )
     shopt -u nullglob
 
     for vr in "${vhost_rotates[@]}"; do
-        logrotate -f "$vr" 2>/dev/null || true
+        logrotate -f "$vr" >/dev/null 2>&1 || true
     done
 
     retention_days="$LOG_RETENTION"
