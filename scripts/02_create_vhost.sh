@@ -622,7 +622,14 @@ server {
         try_files \$uri \$uri/ /index.php?\$args;
     }
 
-    # 6. Login Brute-Force Rate Limiting (Burst: 5, Dedicated Pool Socket)
+    # 6. Block XML-RPC Amplification & Brute-Force Vectors
+    location = /xmlrpc.php {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+
+    # 7. Login Brute-Force Rate Limiting (Burst: 5, Dedicated Pool Socket)
     location = /wp-login.php {
         limit_req zone=wplogin burst=5 nodelay;
         include snippets/fastcgi-php.conf;
@@ -633,7 +640,7 @@ server {
         fastcgi_buffer_size 32k;
     }
 
-    # 7. FastCGI PHP Handler (Mapped strictly to Tenant Isolated Pool)
+    # 8. FastCGI PHP Handler (Mapped strictly to Tenant Isolated Pool)
     location ~ \.php$ {
         include snippets/fastcgi-php.conf;
         fastcgi_pass unix:$php_socket;
@@ -643,7 +650,7 @@ server {
         fastcgi_buffer_size 32k;
     }
 
-    # 8. Static Assets Caching & Disk I/O Optimization
+    # 9. Static Assets Caching & Disk I/O Optimization
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|webp|avif|woff|woff2)$ {
         expires 30d;
         add_header X-Content-Type-Options "nosniff" always;
