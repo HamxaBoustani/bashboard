@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [01] Enterprise LEMP Stack Interactive TUI Installer
-# Version:          1.8.0 (Production Hardened: Dynamic APT Package Resolver for
-#                   PHP 7.4-8.5+, Default VHost Unlink, Blind-Keyspace Redis)
+# Version:          1.8.0 (Production Hardened: Dynamic APT Resolver for PHP 8.5+,
+#                   Sandboxed Loopback phpMyAdmin :8080, Blind-Keyspace Redis)
 # Architecture:     Interactive TUI | Dynamic Discovery | Global Infrastructure Base
 # Platform:         Debian 11/12 (Bullseye/Bookworm), Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -98,15 +98,36 @@ INSTALL_MARIADB=1
 INSTALL_PHP=1
 INSTALL_REDIS=1
 INSTALL_WPCLI=1
+INSTALL_PMA=1
 DB_ROOT_PASS=""
 
 # ------------------------------------------------------------------------------
 # 4. TUI STATUS INDICATORS & HELPERS
 # ------------------------------------------------------------------------------
 detect_installed() {
-    local bin="$1"
-    if command -v "$bin" >/dev/null 2>&1; then
-        echo -e "${GREEN}● INSTALLED${NC}"
+    local target="$1"
+    if [[ "$target" == /* ]]; then
+        if [ -d "$target" ] || [ -f "$target" ]; then
+            echo -e "${GREEN}● INSTALLED${NC}"
+        else
+            echo -e "${GRAY}○ NOT INSTALLED${NC}"
+        fi
+    else
+        if command -v "$target" >/dev/null 2>&1; then
+            echo -e "${GREEN}● INSTALLED${NC}"
+        else
+            echo -e "${GRAY}○ NOT INSTALLED${NC}"
+        fi
+    fi
+}
+
+detect_pma_status() {
+    if [ -d "/usr/share/phpmyadmin" ]; then
+        if [ -f "/etc/nginx/conf.d/00-bashboard-phpmyadmin.conf" ]; then
+            echo -e "${GREEN}● INSTALLED (127.0.0.1:8080)${NC}"
+        else
+            echo -e "${YELLOW}● INSTALLED (Unconfigured)${NC}"
+        fi
     else
         echo -e "${GRAY}○ NOT INSTALLED${NC}"
     fi
@@ -146,13 +167,14 @@ apt_pkg_available() {
 # ------------------------------------------------------------------------------
 draw_tui() {
     clear
-    local st_nginx st_mariadb st_php st_redis st_wpcli
+    local st_nginx st_mariadb st_php st_redis st_wpcli st_pma
     st_nginx=$(detect_installed nginx)
     st_mariadb=$(detect_installed mariadb)
     [[ "$st_mariadb" == *"NOT INSTALLED"* ]] && st_mariadb=$(detect_installed mysql)
     st_php=$(detect_php_status)
     st_redis=$(detect_installed redis-server)
     st_wpcli=$(detect_installed wp)
+    st_pma=$(detect_pma_status)
 
     echo -e "${CYAN}┌────────────────────────────────────────────────────────────────────────────────────────────┐${NC}"
     printf "   🚀 ${BOLD}${WHITE}%-50s${NC}    ${GREEN}Module: %-25s${NC}\n" "BASHBOARD LEMP SUITE" "LEMP Installer TUI"
@@ -166,14 +188,15 @@ draw_tui() {
     printf "   ${CYAN}[3]${NC} %b %-22s ${COL_MID}${GRAY}│${NC} Current Status: %b\n" "$(toggle_status "$INSTALL_PHP")" "PHP-FPM Engine" "$st_php"
     printf "   ${CYAN}[4]${NC} %b %-22s ${COL_MID}${GRAY}│${NC} Current Status: %b\n" "$(toggle_status "$INSTALL_REDIS")" "Redis Object Cache" "$st_redis"
     printf "   ${CYAN}[5]${NC} %b %-22s ${COL_MID}${GRAY}│${NC} Current Status: %b\n" "$(toggle_status "$INSTALL_WPCLI")" "WP-CLI Core CLI" "$st_wpcli"
+    printf "   ${CYAN}[6]${NC} %b %-22s ${COL_MID}${GRAY}│${NC} Current Status: %b\n" "$(toggle_status "$INSTALL_PMA")" "phpMyAdmin (Tunnel)" "$st_pma"
     
     echo -e "${CYAN}├────────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
     echo -e "   ⚙️  ${PURPLE}${BOLD}STACK TUNING PARAMETERS${NC}"
-    printf "      %-22s: ${YELLOW}%-22s${NC}${COL_MID}${GRAY}│${NC} Change with: ${CYAN}[6]${NC}\n" "Target PHP Version" "v${PHP_VER} $([[ ",$SYSTEM_PHPS," == *",$PHP_VER,"* ]] && echo "(Installed)")"
+    printf "      %-22s: ${YELLOW}%-22s${NC}${COL_MID}${GRAY}│${NC} Change with: ${CYAN}[7]${NC}\n" "Target PHP Version" "v${PHP_VER} $([[ ",$SYSTEM_PHPS," == *",$PHP_VER,"* ]] && echo "(Installed)")"
     
     local db_pass_disp="Auto-Socket (Native)"
     if [ -n "$DB_ROOT_PASS" ]; then db_pass_disp="Dual (Socket + Pass)"; fi
-    printf "      %-22s: ${YELLOW}%-22s${NC}${COL_MID}${GRAY}│${NC} Change with: ${CYAN}[7]${NC}\n" "MariaDB Root Pass" "$db_pass_disp"
+    printf "      %-22s: ${YELLOW}%-22s${NC}${COL_MID}${GRAY}│${NC} Change with: ${CYAN}[8]${NC}\n" "MariaDB Root Pass" "$db_pass_disp"
     echo -e "${CYAN}├────────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
     
     echo -e "   ${GREEN}${BOLD}[9] ⚡ START COMPONENT INSTALLATION${NC}"
@@ -196,7 +219,8 @@ while true; do
         3) INSTALL_PHP=$(( 1 - INSTALL_PHP )) ;;
         4) INSTALL_REDIS=$(( 1 - INSTALL_REDIS )) ;;
         5) INSTALL_WPCLI=$(( 1 - INSTALL_WPCLI )) ;;
-        6)
+        6) INSTALL_PMA=$(( 1 - INSTALL_PMA )) ;;
+        7)
             echo -e "\n   ${CYAN}Detected on Server:${NC} ${SYSTEM_PHPS:-None}"
             read -rp "   Enter Target PHP Version (e.g. 7.4, 8.1, 8.2, 8.3, 8.4, 8.5): " user_php
             user_php=$(echo "$user_php" | tr -d '[:space:]')
@@ -207,14 +231,14 @@ while true; do
                 sleep 1.2
             fi
             ;;
-        7)
+        8)
             echo ""
             read -rsp "   Set MariaDB Root Password (leave blank for unix_socket only): " user_db_pass
             echo ""
             DB_ROOT_PASS="$user_db_pass"
             ;;
         9)
-            if [ "$INSTALL_NGINX" -eq 0 ] && [ "$INSTALL_MARIADB" -eq 0 ] && [ "$INSTALL_PHP" -eq 0 ] && [ "$INSTALL_REDIS" -eq 0 ] && [ "$INSTALL_WPCLI" -eq 0 ]; then
+            if [ "$INSTALL_NGINX" -eq 0 ] && [ "$INSTALL_MARIADB" -eq 0 ] && [ "$INSTALL_PHP" -eq 0 ] && [ "$INSTALL_REDIS" -eq 0 ] && [ "$INSTALL_WPCLI" -eq 0 ] && [ "$INSTALL_PMA" -eq 0 ]; then
                 echo -e "\n   ${YELLOW}No components selected! Please toggle at least one.${NC}"
                 sleep 1.5
                 continue
@@ -265,13 +289,13 @@ run_task() {
 
 run_task "Updating APT package index" apt-get update -y
 run_task "Installing base build & DNS utilities" apt-get install -y --no-install-recommends \
-    software-properties-common curl wget gnupg2 ca-certificates lsb-release ufw unzip dnsutils
+    software-properties-common curl wget gnupg2 ca-certificates lsb-release ufw unzip dnsutils debconf-utils
 
 # ------------------------------------------------------------------------------
 # 8. COMPONENT 1: NGINX WEBSERVER & GLOBAL CLOUDFLARE/SECURITY PRIMITIVES
 # ------------------------------------------------------------------------------
 if [ "$INSTALL_NGINX" -eq 1 ]; then
-    echo -e "\n${BLUE}--- [1/5] Configuring Nginx Web Server & Global Primitives ---${NC}"
+    echo -e "\n${BLUE}--- [1/6] Configuring Nginx Web Server & Global Primitives ---${NC}"
     run_task "Installing Nginx package" apt-get install -y nginx
     run_task "Enabling and starting Nginx daemon" systemctl enable --now nginx
 
@@ -359,7 +383,7 @@ fi
 # 9. COMPONENT 2: MARIADB DATABASE ENGINE
 # ------------------------------------------------------------------------------
 if [ "$INSTALL_MARIADB" -eq 1 ]; then
-    echo -e "\n${BLUE}--- [2/5] Configuring MariaDB Database Server ---${NC}"
+    echo -e "\n${BLUE}--- [2/6] Configuring MariaDB Database Server ---${NC}"
     run_task "Installing MariaDB Server & Client" apt-get install -y mariadb-server mariadb-client
     run_task "Enabling and starting MariaDB daemon" systemctl enable --now mariadb
 
@@ -391,7 +415,7 @@ fi
 # 10. COMPONENT 3: PHP-FPM POOL & EXTENSION SUBSYSTEM
 # ------------------------------------------------------------------------------
 if [ "$INSTALL_PHP" -eq 1 ]; then
-    echo -e "\n${BLUE}--- [3/5] Configuring PHP ${PHP_VER}-FPM Engine & Modules ---${NC}"
+    echo -e "\n${BLUE}--- [3/6] Configuring PHP ${PHP_VER}-FPM Engine & Modules ---${NC}"
     
     # OS-Specific Repository Routing
     if [ "$OS_ID" = "ubuntu" ]; then
@@ -473,7 +497,7 @@ fi
 # 11. COMPONENT 4: REDIS OBJECT CACHE ENGINE (With Blind-Keyspace Hardening)
 # ------------------------------------------------------------------------------
 if [ "$INSTALL_REDIS" -eq 1 ]; then
-    echo -e "\n${BLUE}--- [4/5] Configuring Redis Cache Subsystem ---${NC}"
+    echo -e "\n${BLUE}--- [4/6] Configuring Redis Cache Subsystem ---${NC}"
     run_task "Installing Redis Server" apt-get install -y redis-server
     
     if [ -f "/etc/redis/redis.conf" ]; then
@@ -507,7 +531,7 @@ fi
 # 12. COMPONENT 5: WP-CLI ORCHESTRATION TOOL
 # ------------------------------------------------------------------------------
 if [ "$INSTALL_WPCLI" -eq 1 ]; then
-    echo -e "\n${BLUE}--- [5/5] Deploying WP-CLI Framework ---${NC}"
+    echo -e "\n${BLUE}--- [5/6] Deploying WP-CLI Framework ---${NC}"
     run_task "Downloading and verifying WP-CLI binary" bash -c '
         tmp_wp=$(mktemp /tmp/wpcli_XXXXXX.phar)
         curl -fsSL -o "$tmp_wp" https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
@@ -528,7 +552,132 @@ if [ "$INSTALL_WPCLI" -eq 1 ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 13. PROVISIONING VERIFICATION & STATUS REPORT
+# 13. COMPONENT 6: SANDBOXED PHPMYADMIN (127.0.0.1:8080 SSH-TUNNEL ONLY)
+# ------------------------------------------------------------------------------
+if [ "$INSTALL_PMA" -eq 1 ]; then
+    echo -e "\n${BLUE}--- [6/6] Deploying Sandboxed phpMyAdmin (SSH-Tunnel :8080) ---${NC}"
+
+    # Pre-seed debconf to bypass interactive webserver & dbconfig prompts (avoids Apache bloat)
+    echo "phpmyadmin phpmyadmin/reconfigure-webserver multiselect" | debconf-set-selections 2>/dev/null || true
+    echo "phpmyadmin phpmyadmin/dbconfig-install boolean false" | debconf-set-selections 2>/dev/null || true
+
+    run_task "Installing phpMyAdmin package (Non-Interactive)" \
+        apt-get install -y --no-install-recommends phpmyadmin
+
+    run_task "Provisioning isolated phpMyAdmin FPM pool & user (v_pma_sys)" bash -c "
+        pma_user='v_pma_sys'
+        pma_tmp='/var/lib/phpmyadmin/tmp'
+        pma_sock='/run/php/php${PHP_VER}-fpm-phpmyadmin.sock'
+        pma_pool='/etc/php/${PHP_VER}/fpm/pool.d/phpmyadmin.conf'
+
+        getent group \"\$pma_user\" >/dev/null 2>&1 || groupadd -r \"\$pma_user\"
+        id -u \"\$pma_user\" >/dev/null 2>&1 || useradd -r -g \"\$pma_user\" -s /usr/sbin/nologin -d /var/lib/phpmyadmin -M \"\$pma_user\"
+
+        mkdir -p \"\$pma_tmp\" /run/php \"/etc/php/${PHP_VER}/fpm/pool.d\"
+        chown -R \"\$pma_user:www-data\" /var/lib/phpmyadmin
+        chmod 700 \"\$pma_tmp\"
+        if [ -f /etc/phpmyadmin/config-db.php ]; then
+            chown root:\"\$pma_user\" /etc/phpmyadmin/config-db.php 2>/dev/null || true
+            chmod 640 /etc/phpmyadmin/config-db.php 2>/dev/null || true
+        fi
+
+        # Ensure blowfish_secret is populated (32 chars)
+        if [ -f /var/lib/phpmyadmin/blowfish_secret.inc.php ] && ! grep -q \"blowfish_secret\" /var/lib/phpmyadmin/blowfish_secret.inc.php 2>/dev/null; then
+            bf_secret=\$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
+            printf \"<?php\\n\\\$cfg['blowfish_secret'] = '%s';\\n\" \"\$bf_secret\" > /var/lib/phpmyadmin/blowfish_secret.inc.php
+            chown \"\$pma_user:\$pma_user\" /var/lib/phpmyadmin/blowfish_secret.inc.php
+            chmod 600 /var/lib/phpmyadmin/blowfish_secret.inc.php
+        fi
+
+        cat > \"\$pma_pool\" <<EOF
+; ==============================================================================
+; Bashboard Isolated phpMyAdmin Pool (Zero Access to /var/www/* Tenants)
+; ==============================================================================
+[phpmyadmin]
+user = \$pma_user
+group = \$pma_user
+
+listen = \$pma_sock
+listen.owner = www-data
+listen.group = www-data
+listen.mode = 0660
+
+pm = ondemand
+pm.max_children = 4
+pm.process_idle_timeout = 10s
+pm.max_requests = 200
+
+request_terminate_timeout = 300s
+
+php_admin_flag[log_errors] = on
+php_admin_flag[expose_php] = off
+php_admin_value[upload_tmp_dir] = \$pma_tmp
+php_admin_value[session.save_path] = \$pma_tmp
+php_admin_value[sys_temp_dir] = \$pma_tmp
+
+; Strict Jail: Completely blocks phpMyAdmin from reading /var/www/* tenant files
+php_admin_value[open_basedir] = /usr/share/phpmyadmin/:/etc/phpmyadmin/:/var/lib/phpmyadmin/:/usr/share/php/:/usr/share/javascript/:/dev/urandom:/usr/share/zoneinfo/
+php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,show_source,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid
+
+php_value[memory_limit] = 256M
+php_value[upload_max_filesize] = 256M
+php_value[post_max_size] = 256M
+php_value[max_execution_time] = 300
+EOF
+
+        systemctl restart \"php${PHP_VER}-fpm\"
+    "
+
+    run_task "Binding phpMyAdmin Nginx listener strictly to 127.0.0.1:8080" bash -c "
+        # Remove any legacy manual sites-enabled/phpmyadmin to prevent port 8080 conflict & VHost list pollution
+        rm -f /etc/nginx/sites-enabled/phpmyadmin /etc/nginx/sites-available/phpmyadmin
+
+        cat > /etc/nginx/conf.d/00-bashboard-phpmyadmin.conf <<EOF
+# Bashboard Zero-Public-Exposure phpMyAdmin Listener (SSH Tunnel Only)
+server {
+    listen 127.0.0.1:8080;
+    server_name _;
+
+    root /usr/share/phpmyadmin;
+    index index.php index.html;
+
+    access_log off;
+    error_log /var/log/nginx/phpmyadmin_error.log;
+
+    server_tokens off;
+    client_max_body_size 256M;
+
+    add_header X-Frame-Options \"SAMEORIGIN\" always;
+    add_header X-Content-Type-Options \"nosniff\" always;
+
+    location / {
+        try_files \\\$uri \\\$uri/ =404;
+    }
+
+    location ~ \\.php\$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php${PHP_VER}-fpm-phpmyadmin.sock;
+        fastcgi_param SCRIPT_FILENAME \\\$document_root\\\$fastcgi_script_name;
+        fastcgi_read_timeout 300s;
+        fastcgi_buffers 16 16k;
+        fastcgi_buffer_size 32k;
+    }
+
+    location ~ /\\. {
+        deny all;
+    }
+
+    location ~ ^/(libraries|setup|templates|locale|sql) {
+        deny all;
+    }
+}
+EOF
+        nginx -t && systemctl reload nginx
+    "
+fi
+
+# ------------------------------------------------------------------------------
+# 14. PROVISIONING VERIFICATION & STATUS REPORT
 # ------------------------------------------------------------------------------
 echo -e "\n${GREEN}=================================================================="
 echo -e "   🎉 LEMP STACK PROVISIONING FINISHED SUCCESSFULLY"
@@ -538,5 +687,13 @@ echo -e "==================================================================${NC}
 [ "$INSTALL_PHP" -eq 1 ] && printf "   %-20s: %b\n" "PHP-FPM Engine" "$(systemctl is-active --quiet "php${PHP_VER}-fpm" && echo "${GREEN}● ACTIVE (v${PHP_VER})${NC}" || echo "${RED}○ FAILED${NC}")"
 [ "$INSTALL_REDIS" -eq 1 ] && printf "   %-20s: %b\n" "Redis Status" "$(systemctl is-active --quiet redis-server && echo "${GREEN}● ACTIVE (Blind-Keyspace Locked)${NC}" || echo "${RED}○ FAILED${NC}")"
 [ "$INSTALL_WPCLI" -eq 1 ] && printf "   %-20s: %b\n" "WP-CLI Command" "$(command -v wp >/dev/null && echo "${GREEN}● READY (/usr/local/bin/wp)${NC}" || echo "${RED}○ MISSING${NC}")"
+if [ "$INSTALL_PMA" -eq 1 ] && [ -f "/etc/nginx/conf.d/00-bashboard-phpmyadmin.conf" ]; then
+    srv_ip=$(cat /run/bashboard_ip 2>/dev/null || echo "SERVER_IP")
+    printf "   %-20s: %b\n" "phpMyAdmin" "${GREEN}● ISOLATED ON 127.0.0.1:8080 (Pool: v_pma_sys)${NC}"
+    echo -e "   ${GRAY}--------------------------------------------------------------${NC}"
+    echo -e "   🔒 ${CYAN}SSH Tunnel Command (Run on your laptop):${NC}"
+    echo -e "      ${YELLOW}ssh -L 8081:127.0.0.1:8080 $(whoami)@${srv_ip}${NC}"
+    echo -e "      Then open in browser: ${WHITE}http://localhost:8081${NC}"
+fi
 echo -e "${GREEN}==================================================================${NC}"
 exit 0
