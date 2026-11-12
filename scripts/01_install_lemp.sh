@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [01] Enterprise LEMP Stack Interactive TUI Installer
-# Version:          1.8.0 (Production Hardened: Dual-OS Sury/PPA Engine, Default
-#                   VHost Unlink, Dual-Auth MariaDB, Blind-Keyspace Redis Lock)
+# Version:          1.8.0 (Production Hardened: Dynamic APT Package Resolver for
+#                   PHP 7.4-8.5+, Default VHost Unlink, Blind-Keyspace Redis)
 # Architecture:     Interactive TUI | Dynamic Discovery | Global Infrastructure Base
 # Platform:         Debian 11/12 (Bullseye/Bookworm), Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -133,6 +133,14 @@ toggle_status() {
     fi
 }
 
+# Checks if an APT package has an actual installation candidate in current repositories
+apt_pkg_available() {
+    local pkg="$1"
+    local cand
+    cand=$(apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/ {print $2}' || true)
+    [[ -n "$cand" && "$cand" != "(none)" ]]
+}
+
 # ------------------------------------------------------------------------------
 # 5. TUI DASHBOARD RENDERER
 # ------------------------------------------------------------------------------
@@ -163,7 +171,7 @@ draw_tui() {
     echo -e "   ⚙️  ${PURPLE}${BOLD}STACK TUNING PARAMETERS${NC}"
     printf "      %-22s: ${YELLOW}%-22s${NC}${COL_MID}${GRAY}│${NC} Change with: ${CYAN}[6]${NC}\n" "Target PHP Version" "v${PHP_VER} $([[ ",$SYSTEM_PHPS," == *",$PHP_VER,"* ]] && echo "(Installed)")"
     
-    local db_pass_disp="Auto-Socket (Preserved)"
+    local db_pass_disp="Auto-Socket (Native)"
     if [ -n "$DB_ROOT_PASS" ]; then db_pass_disp="Dual (Socket + Pass)"; fi
     printf "      %-22s: ${YELLOW}%-22s${NC}${COL_MID}${GRAY}│${NC} Change with: ${CYAN}[7]${NC}\n" "MariaDB Root Pass" "$db_pass_disp"
     echo -e "${CYAN}├────────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
@@ -398,7 +406,7 @@ if [ "$INSTALL_PHP" -eq 1 ]; then
         fi
     fi
 
-    PHP_CORE_MODULES=(
+    PHP_CANDIDATE_MODULES=(
         "php${PHP_VER}-fpm"
         "php${PHP_VER}-cli"
         "php${PHP_VER}-common"
@@ -413,16 +421,33 @@ if [ "$INSTALL_PHP" -eq 1 ]; then
         "php${PHP_VER}-bcmath"
         "php${PHP_VER}-opcache"
         "php${PHP_VER}-readline"
+        "php${PHP_VER}-redis"
+        "php${PHP_VER}-imagick"
     )
 
-    run_task "Installing PHP ${PHP_VER}-FPM core & standard extensions" \
-        apt-get install -y "${PHP_CORE_MODULES[@]}"
+    # Filter only packages with valid installation candidates in APT cache
+    # (Seamlessly handles PHP 8.5+ built-in opcache & generic PECL fallbacks)
+    VALID_PHP_PKGS=()
+    for pkg in "${PHP_CANDIDATE_MODULES[@]}"; do
+        if apt_pkg_available "$pkg"; then
+            VALID_PHP_PKGS+=("$pkg")
+        else
+            ext_name="${pkg#php${PHP_VER}-}"
+            if apt_pkg_available "php-${ext_name}"; then
+                VALID_PHP_PKGS+=("php-${ext_name}")
+            else
+                echo "   [INFO] Skipping unavailable/built-in package: $pkg" >> "$INSTALL_LOG"
+            fi
+        fi
+    done
 
-    # Resilient PECL extension installer (falls back to generic php-redis/php-imagick on bleeding-edge distros)
-    run_task "Installing PHP Redis & Imagick PECL extensions" bash -c "
-        apt-get install -y php${PHP_VER}-redis 2>/dev/null || apt-get install -y php-redis 2>/dev/null || true
-        apt-get install -y php${PHP_VER}-imagick 2>/dev/null || apt-get install -y php-imagick 2>/dev/null || true
-    "
+    if [ ${#VALID_PHP_PKGS[@]} -eq 0 ]; then
+        echo -e "   ${RED}❌ [ERROR] No installable packages found for PHP ${PHP_VER} in APT repositories.${NC}" >&2
+        exit 1
+    fi
+
+    run_task "Installing PHP ${PHP_VER}-FPM core & available extensions" \
+        apt-get install -y "${VALID_PHP_PKGS[@]}"
 
     php_ini_file="/etc/php/${PHP_VER}/fpm/php.ini"
     if [ -f "$php_ini_file" ]; then
