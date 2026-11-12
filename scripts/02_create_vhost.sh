@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [02] Nginx Virtual Host & Architecture Deployer (TUI Edition)
-# Version:          1.7.0 (CIS & OWASP Hardened: Canonical www 301, Global Rate-Limit
-#                   Zone, Sensitive File Denylist, Dedicated Pool FastCGI Buffers)
+# Version:          1.7.1 (CIS & OWASP Hardened: Multi-Tier Public DNS Resolver,
+#                   Post-TLS Loopback Pinning, Canonical www 301, Rate-Limit Zone)
 # Architecture:     Interactive TUI Configurator | Commercial Hosting Standard
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -341,6 +341,7 @@ rollback_on_failure() {
         rm -f "/etc/nginx/sites-enabled/$DOMAIN" "/etc/nginx/sites-available/$DOMAIN"
         rm -f "/etc/nginx/ssl/$DOMAIN.crt" "/etc/nginx/ssl/$DOMAIN.key"
         rm -f "/etc/logrotate.d/vhost-$DOMAIN"
+        sed -i "/[[:space:]]${DOMAIN}\([[:space:]]\|$\)/d" /etc/hosts 2>/dev/null || true
         nginx -t >/dev/null 2>&1 && systemctl reload nginx 2>/dev/null || true
 
         rm -f "/etc/php/${PHP_VER}/fpm/pool.d/${pool_name}.conf" "/run/php/php${PHP_VER}-fpm-${pool_name}.sock"
@@ -688,17 +689,6 @@ else
     exit 1
 fi
 
-# # 8.5 Universal Local Loopback Pinning (/etc/hosts)
-# # Guarantees zero-latency internal requests for WordPress Site Health,
-# # background workers, and WAF loopback tests without routing through Cloudflare/WAN.
-# extra_hosts_entries=""
-# [ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ] && extra_hosts_entries="uploads.$DOMAIN"
-
-# if ! grep -qE "[[:space:]]${DOMAIN}([[:space:]]|$)" /etc/hosts; then
-#     echo "127.0.0.1 $DOMAIN www.$DOMAIN ${extra_hosts_entries}" >> /etc/hosts
-#     echo -e "   ${GREEN}✅ Local Loopback Pinned: 127.0.0.1 mapped to ${DOMAIN} (/etc/hosts).${NC}"
-# fi
-
 # ------------------------------------------------------------------------------
 # 9. DATABASE PROVISIONING (For WordPress Payload)
 # ------------------------------------------------------------------------------
@@ -855,8 +845,54 @@ chown root:root "/var/www/$DOMAIN/.bashboard-state"
 chmod 600 "/var/www/$DOMAIN/.bashboard-state"
 
 # ------------------------------------------------------------------------------
-# 12. LET'S ENCRYPT AUTOMATION ENGINE (With Pre-flight DNS Validation)
+# 12. LET'S ENCRYPT AUTOMATION ENGINE (With Multi-Tier Public DNS Validation)
 # ------------------------------------------------------------------------------
+# Queries public DNS resolvers directly via IP (DoH + UDP/TCP) without touching
+# /etc/hosts or local nsswitch cache.
+resolve_public_ip() {
+    local target_d="$1"
+    local ip=""
+
+    # Tier 1: Direct IP-based DoH (Bypasses local DNS resolution & UDP port 53 blocks)
+    for doh_endpoint in \
+        "https://1.1.1.1/dns-query?name=${target_d}&type=A" \
+        "https://8.8.8.8/resolve?name=${target_d}&type=A"; do
+        ip=$(curl -4 -s --connect-timeout 3 -m 4 -H "accept: application/dns-json" "$doh_endpoint" 2>/dev/null \
+            | grep -oE '"data":"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"' \
+            | head -n1 | cut -d'"' -f4 || true)
+        if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$ip"
+            return 0
+        fi
+    done
+
+    # Tier 2: Direct UDP/TCP query to public nameservers via dig (if available)
+    if command -v dig >/dev/null 2>&1; then
+        for ns in 1.1.1.1 8.8.8.8 9.9.9.9; do
+            ip=$(dig +short +time=2 +tries=1 @"$ns" "$target_d" A 2>/dev/null \
+                | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
+            if [[ -n "$ip" ]]; then
+                echo "$ip"
+                return 0
+            fi
+        done
+    fi
+
+    # Tier 3: Direct query via host utility (if available)
+    if command -v host >/dev/null 2>&1; then
+        for ns in 1.1.1.1 8.8.8.8; do
+            ip=$(host -t A -W 2 "$target_d" "$ns" 2>/dev/null \
+                | awk '/has address/ {print $NF}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
+            if [[ -n "$ip" ]]; then
+                echo "$ip"
+                return 0
+            fi
+        done
+    fi
+
+    echo ""
+}
+
 issue_letsencrypt_ssl() {
     local domain="$1"
     local enable_media="${2:-0}"
@@ -872,10 +908,13 @@ issue_letsencrypt_ssl() {
 
     local server_ip=""
     if [ -f "/run/bashboard_ip" ]; then
-        server_ip=$(cat "/run/bashboard_ip" 2>/dev/null || true)
+        server_ip=$(cat "/run/bashboard_ip" 2>/dev/null | tr -d '[:space:]' || true)
     fi
     if [[ ! "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        server_ip=$(curl -4 -s --connect-timeout 2 https://api.ipify.org 2>/dev/null || true)
+        for ip_url in "https://api.ipify.org" "https://icanhazip.com" "https://ifconfig.me/ip"; do
+            server_ip=$(curl -4 -s --connect-timeout 3 -m 4 "$ip_url" 2>/dev/null | tr -d '[:space:]' || true)
+            [[ "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && break
+        done
     fi
 
     echo -e "         Executing pre-flight DNS verification against public nameservers..."
@@ -884,11 +923,7 @@ issue_letsencrypt_ssl() {
 
     for d in "${domains_to_cert[@]}"; do
         local resolved_ip
-        resolved_ip=$(curl -s --connect-timeout 2 "https://cloudflare-dns.com/dns-query?name=${d}&type=A" -H "accept: application/dns-json" 2>/dev/null | grep -oE '"data":"[0-9.]+"' | cut -d'"' -f4 | head -n1 || true)
-        
-        if [ -z "$resolved_ip" ]; then
-            resolved_ip=$(getent ahosts "$d" 2>/dev/null | awk '{print $1}' | head -n 1 || true)
-        fi
+        resolved_ip=$(resolve_public_ip "$d")
 
         if [[ -z "$resolved_ip" || -z "$server_ip" || "$resolved_ip" != "$server_ip" ]]; then
             echo -e "         ${YELLOW}⚠️  DNS pre-flight check bypassed for '$d':${NC}"
@@ -923,11 +958,11 @@ if [ "$ENABLE_LETSENCRYPT" -eq 1 ]; then
     issue_letsencrypt_ssl "$DOMAIN" "$ENABLE_MEDIA_SUBDOMAIN" || true
 fi
 
-trap - ERR
-
-# 8.5 Universal Local Loopback Pinning (/etc/hosts)
-# Guarantees zero-latency internal requests for WordPress Site Health,
-# background workers, and WAF loopback tests without routing through Cloudflare/WAN.
+# ------------------------------------------------------------------------------
+# 12.5 UNIVERSAL LOCAL LOOPBACK PINNING (/etc/hosts)
+# ------------------------------------------------------------------------------
+# Executed strictly AFTER Let's Encrypt validation to prevent local resolver
+# collisions while guaranteeing zero-latency internal loopback for WP-Cron/REST.
 extra_hosts_entries=""
 [ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ] && extra_hosts_entries="uploads.$DOMAIN"
 
@@ -935,6 +970,8 @@ if ! grep -qE "[[:space:]]${DOMAIN}([[:space:]]|$)" /etc/hosts; then
     echo "127.0.0.1 $DOMAIN www.$DOMAIN ${extra_hosts_entries}" >> /etc/hosts
     echo -e "   ${GREEN}✅ Local Loopback Pinned: 127.0.0.1 mapped to ${DOMAIN} (/etc/hosts).${NC}"
 fi
+
+trap - ERR
 
 # ------------------------------------------------------------------------------
 # 13. FINAL DEPLOYMENT SUMMARY REPORT
