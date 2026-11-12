@@ -607,7 +607,7 @@ draw_dashboard() {
     local r_fmt="      %-16s: ${WHITE}%-21s${NC}${COL_MID}${GRAY}│${NC} %-16s: ${WHITE}%-20s${NC}\n"
 
     echo -e "${CYAN}┌────────────────────────────────────────────────────────────────────────────────────────────┐${NC}"
-    printf "   🚀 ${BOLD}${WHITE}%-50s${NC}    ${GREEN}Server Time: %-20s${NC}\n" "BASHBOARD (V1.6.6)" "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf "   🚀 ${BOLD}${WHITE}%-50s${NC}    ${GREEN}Server Time: %-20s${NC}\n" "BASHBOARD (V1.8.0)" "$(date '+%Y-%m-%d %H:%M:%S')"
     echo -e "${CYAN}├────────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
 
     echo -e "   📋 ${PURPLE}${BOLD}SERVER INFORMATION${NC}"

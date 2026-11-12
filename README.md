@@ -1,4 +1,4 @@
-# 🚀 Bashboard: Lightweight Linux VPS Control Plane & Multi-Site Orchestrator
+# 🚀 Bashboard: Lightweight Linux VPS & LEMP Control Plane
 
 ![Version](https://img.shields.io/badge/Version-1.8.0-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-Ubuntu_22.04%20|%2024.04%20|%2026.04_LTS%20|%20Debian_11%20|%2012-lightgrey.svg?logo=linux)
