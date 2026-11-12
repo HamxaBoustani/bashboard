@@ -688,16 +688,16 @@ else
     exit 1
 fi
 
-# 8.5 Universal Local Loopback Pinning (/etc/hosts)
-# Guarantees zero-latency internal requests for WordPress Site Health,
-# background workers, and WAF loopback tests without routing through Cloudflare/WAN.
-extra_hosts_entries=""
-[ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ] && extra_hosts_entries="uploads.$DOMAIN"
+# # 8.5 Universal Local Loopback Pinning (/etc/hosts)
+# # Guarantees zero-latency internal requests for WordPress Site Health,
+# # background workers, and WAF loopback tests without routing through Cloudflare/WAN.
+# extra_hosts_entries=""
+# [ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ] && extra_hosts_entries="uploads.$DOMAIN"
 
-if ! grep -qE "[[:space:]]${DOMAIN}([[:space:]]|$)" /etc/hosts; then
-    echo "127.0.0.1 $DOMAIN www.$DOMAIN ${extra_hosts_entries}" >> /etc/hosts
-    echo -e "   ${GREEN}✅ Local Loopback Pinned: 127.0.0.1 mapped to ${DOMAIN} (/etc/hosts).${NC}"
-fi
+# if ! grep -qE "[[:space:]]${DOMAIN}([[:space:]]|$)" /etc/hosts; then
+#     echo "127.0.0.1 $DOMAIN www.$DOMAIN ${extra_hosts_entries}" >> /etc/hosts
+#     echo -e "   ${GREEN}✅ Local Loopback Pinned: 127.0.0.1 mapped to ${DOMAIN} (/etc/hosts).${NC}"
+# fi
 
 # ------------------------------------------------------------------------------
 # 9. DATABASE PROVISIONING (For WordPress Payload)
@@ -924,6 +924,17 @@ if [ "$ENABLE_LETSENCRYPT" -eq 1 ]; then
 fi
 
 trap - ERR
+
+# 8.5 Universal Local Loopback Pinning (/etc/hosts)
+# Guarantees zero-latency internal requests for WordPress Site Health,
+# background workers, and WAF loopback tests without routing through Cloudflare/WAN.
+extra_hosts_entries=""
+[ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ] && extra_hosts_entries="uploads.$DOMAIN"
+
+if ! grep -qE "[[:space:]]${DOMAIN}([[:space:]]|$)" /etc/hosts; then
+    echo "127.0.0.1 $DOMAIN www.$DOMAIN ${extra_hosts_entries}" >> /etc/hosts
+    echo -e "   ${GREEN}✅ Local Loopback Pinned: 127.0.0.1 mapped to ${DOMAIN} (/etc/hosts).${NC}"
+fi
 
 # ------------------------------------------------------------------------------
 # 13. FINAL DEPLOYMENT SUMMARY REPORT
