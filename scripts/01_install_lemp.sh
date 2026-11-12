@@ -2,7 +2,7 @@
 # ==============================================================================
 # BASHBOARD MODULE: [01] Enterprise LEMP Stack Interactive TUI Installer
 # Version:          1.8.0 (Production Hardened: Dual-OS Sury/PPA Engine, Default
-#                   VHost Unlink, Dual-Auth MariaDB Socket+Pass, DNS Utilities)
+#                   VHost Unlink, Dual-Auth MariaDB, Blind-Keyspace Redis Lock)
 # Architecture:     Interactive TUI | Dynamic Discovery | Global Infrastructure Base
 # Platform:         Debian 11/12 (Bullseye/Bookworm), Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -398,7 +398,7 @@ if [ "$INSTALL_PHP" -eq 1 ]; then
         fi
     fi
 
-    PHP_MODULES=(
+    PHP_CORE_MODULES=(
         "php${PHP_VER}-fpm"
         "php${PHP_VER}-cli"
         "php${PHP_VER}-common"
@@ -411,23 +411,28 @@ if [ "$INSTALL_PHP" -eq 1 ]; then
         "php${PHP_VER}-xml"
         "php${PHP_VER}-zip"
         "php${PHP_VER}-bcmath"
-        "php${PHP_VER}-imagick"
-        "php${PHP_VER}-redis"
         "php${PHP_VER}-opcache"
         "php${PHP_VER}-readline"
     )
 
-    run_task "Installing PHP ${PHP_VER}-FPM core & enterprise extensions" \
-        apt-get install -y "${PHP_MODULES[@]}"
+    run_task "Installing PHP ${PHP_VER}-FPM core & standard extensions" \
+        apt-get install -y "${PHP_CORE_MODULES[@]}"
+
+    # Resilient PECL extension installer (falls back to generic php-redis/php-imagick on bleeding-edge distros)
+    run_task "Installing PHP Redis & Imagick PECL extensions" bash -c "
+        apt-get install -y php${PHP_VER}-redis 2>/dev/null || apt-get install -y php-redis 2>/dev/null || true
+        apt-get install -y php${PHP_VER}-imagick 2>/dev/null || apt-get install -y php-imagick 2>/dev/null || true
+    "
 
     php_ini_file="/etc/php/${PHP_VER}/fpm/php.ini"
     if [ -f "$php_ini_file" ]; then
-        run_task "Tuning PHP-FPM php.ini limits (128M Upload / 512M Memory)" bash -c "
+        run_task "Tuning PHP-FPM php.ini limits & hiding expose_php header" bash -c "
             sed -i 's/^upload_max_filesize = .*/upload_max_filesize = 128M/' '$php_ini_file'
             sed -i 's/^post_max_size = .*/post_max_size = 128M/' '$php_ini_file'
             sed -i 's/^memory_limit = .*/memory_limit = 512M/' '$php_ini_file'
             sed -i 's/^max_execution_time = .*/max_execution_time = 300/' '$php_ini_file'
             sed -i 's/^;cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/' '$php_ini_file'
+            sed -i 's/^expose_php = .*/expose_php = Off/' '$php_ini_file'
         "
     fi
 
@@ -436,15 +441,32 @@ if [ "$INSTALL_PHP" -eq 1 ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 11. COMPONENT 4: REDIS OBJECT CACHE ENGINE
+# 11. COMPONENT 4: REDIS OBJECT CACHE ENGINE (With Blind-Keyspace Hardening)
 # ------------------------------------------------------------------------------
 if [ "$INSTALL_REDIS" -eq 1 ]; then
     echo -e "\n${BLUE}--- [4/5] Configuring Redis Cache Subsystem ---${NC}"
     run_task "Installing Redis Server" apt-get install -y redis-server
     
     if [ -f "/etc/redis/redis.conf" ]; then
-        run_task "Enforcing systemd supervision in redis.conf" \
-            sed -i 's/^supervised no/supervised systemd/' /etc/redis/redis.conf
+        run_task "Enforcing systemd supervision & Blind-Keyspace security" bash -c '
+            sed -i "s/^supervised no/supervised systemd/" /etc/redis/redis.conf
+            sed -i "/# Bashboard Redis Security/,/# End Bashboard Redis Security/d" /etc/redis/redis.conf
+            cat >> /etc/redis/redis.conf <<\EOF
+
+# Bashboard Redis Security (Blind-Keyspace & Admin Command Lockdown)
+rename-command KEYS ""
+rename-command SCAN ""
+rename-command MONITOR ""
+rename-command CONFIG ""
+rename-command SHUTDOWN ""
+rename-command DEBUG ""
+rename-command BGSAVE ""
+rename-command SAVE ""
+rename-command SLAVEOF ""
+rename-command REPLICAOF ""
+# End Bashboard Redis Security
+EOF
+        '
     fi
 
     run_task "Enabling and restarting Redis Service" bash -c "
@@ -485,7 +507,7 @@ echo -e "==================================================================${NC}
 [ "$INSTALL_NGINX" -eq 1 ] && printf "   %-20s: %b\n" "Nginx Status" "$(systemctl is-active --quiet nginx && echo "${GREEN}● ACTIVE${NC}" || echo "${RED}○ FAILED${NC}")"
 [ "$INSTALL_MARIADB" -eq 1 ] && printf "   %-20s: %b\n" "MariaDB Status" "$(systemctl is-active --quiet mariadb && echo "${GREEN}● ACTIVE${NC}" || echo "${RED}○ FAILED${NC}")"
 [ "$INSTALL_PHP" -eq 1 ] && printf "   %-20s: %b\n" "PHP-FPM Engine" "$(systemctl is-active --quiet "php${PHP_VER}-fpm" && echo "${GREEN}● ACTIVE (v${PHP_VER})${NC}" || echo "${RED}○ FAILED${NC}")"
-[ "$INSTALL_REDIS" -eq 1 ] && printf "   %-20s: %b\n" "Redis Status" "$(systemctl is-active --quiet redis-server && echo "${GREEN}● ACTIVE${NC}" || echo "${RED}○ FAILED${NC}")"
+[ "$INSTALL_REDIS" -eq 1 ] && printf "   %-20s: %b\n" "Redis Status" "$(systemctl is-active --quiet redis-server && echo "${GREEN}● ACTIVE (Blind-Keyspace Locked)${NC}" || echo "${RED}○ FAILED${NC}")"
 [ "$INSTALL_WPCLI" -eq 1 ] && printf "   %-20s: %b\n" "WP-CLI Command" "$(command -v wp >/dev/null && echo "${GREEN}● READY (/usr/local/bin/wp)${NC}" || echo "${RED}○ MISSING${NC}")"
 echo -e "${GREEN}==================================================================${NC}"
 exit 0
