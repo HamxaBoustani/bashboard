@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [02] Nginx Virtual Host & Architecture Deployer (TUI Edition)
-# Version:          1.8.0 (CIS & OWASP Hardened: Zero-Mutation Webroot ACME TLS,
-#                   Syscall-Hardened FPM Pool, Multi-Tier DNS, Post-TLS Loopback)
+# Version:          1.8.1 (CIS & OWASP Hardened: Kernel Interface IP Discovery,
+#                   Graceful Subdomain SSL Degradation, Zero-Mutation Webroot ACME)
 # Architecture:     Interactive TUI Configurator | Commercial Hosting Standard
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -874,7 +874,7 @@ chown root:root "/var/www/$DOMAIN/.bashboard-state"
 chmod 600 "/var/www/$DOMAIN/.bashboard-state"
 
 # ------------------------------------------------------------------------------
-# 12. LET'S ENCRYPT AUTOMATION ENGINE (Zero-Mutation Webroot + Multi-Tier DNS)
+# 12. LET'S ENCRYPT AUTOMATION ENGINE (Interface-First IP & Graceful Subdomains)
 # ------------------------------------------------------------------------------
 # Queries public DNS resolvers directly via UDP/TCP & IP-based DoH without
 # touching /etc/hosts or local nsswitch cache.
@@ -922,6 +922,39 @@ resolve_public_ip() {
     echo ""
 }
 
+# Collects all valid public IPv4s assigned to this server (NIC + cached + outbound)
+get_server_public_ips() {
+    local ips=()
+    local nic_ip cached_ip ext_ip
+
+    if command -v ip >/dev/null 2>&1; then
+        while IFS= read -r nic_ip; do
+            [[ -n "$nic_ip" ]] && ips+=("$nic_ip")
+        done < <(ip -4 addr show scope global 2>/dev/null \
+            | awk '/inet / {split($2, a, "/"); print a[1]}' \
+            | grep -vE '^(10\.|127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.)' || true)
+    fi
+
+    if [ -f "/run/bashboard_ip" ]; then
+        cached_ip=$(cat "/run/bashboard_ip" 2>/dev/null | tr -d '[:space:]' || true)
+        [[ "$cached_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && ips+=("$cached_ip")
+    fi
+
+    if [ ${#ips[@]} -eq 0 ]; then
+        for ip_url in "https://api.ipify.org" "https://icanhazip.com" "https://ifconfig.me/ip"; do
+            ext_ip=$(curl -4 -s --noproxy '*' --connect-timeout 3 -m 4 "$ip_url" 2>/dev/null | tr -d '[:space:]' || true)
+            if [[ "$ext_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                ips+=("$ext_ip")
+                break
+            fi
+        done
+    fi
+
+    if [ ${#ips[@]} -gt 0 ]; then
+        printf "%s\n" "${ips[@]}" | awk '!seen[$0]++'
+    fi
+}
+
 issue_letsencrypt_ssl() {
     local domain="$1"
     local enable_media="${2:-0}"
@@ -935,37 +968,52 @@ issue_letsencrypt_ssl() {
         apt-get update -qq && apt-get install -y -qq certbot python3-certbot-nginx
     fi
 
-    local server_ip=""
-    if [ -f "/run/bashboard_ip" ]; then
-        server_ip=$(cat "/run/bashboard_ip" 2>/dev/null | tr -d '[:space:]' || true)
-    fi
-    if [[ ! "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        for ip_url in "https://api.ipify.org" "https://icanhazip.com" "https://ifconfig.me/ip"; do
-            server_ip=$(curl -4 -s --connect-timeout 3 -m 4 "$ip_url" 2>/dev/null | tr -d '[:space:]' || true)
-            [[ "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && break
-        done
-    fi
+    local server_ips=()
+    while IFS= read -r sip; do
+        [[ -n "$sip" ]] && server_ips+=("$sip")
+    done < <(get_server_public_ips)
+
+    local primary_server_ip="${server_ips[0]:-Unknown}"
 
     echo -e "         Executing pre-flight DNS verification against public nameservers..."
-    local domains_to_cert=("$domain" "www.$domain")
-    [[ "$enable_media" -eq 1 ]] && domains_to_cert+=("uploads.$domain")
+    local candidate_domains=("$domain" "www.$domain")
+    [[ "$enable_media" -eq 1 ]] && candidate_domains+=("uploads.$domain")
 
-    for d in "${domains_to_cert[@]}"; do
-        local resolved_ip
+    local verified_domains=()
+
+    for d in "${candidate_domains[@]}"; do
+        local resolved_ip match_found=0
         resolved_ip=$(resolve_public_ip "$d")
 
-        if [[ -z "$resolved_ip" || -z "$server_ip" || "$resolved_ip" != "$server_ip" ]]; then
-            echo -e "         ${YELLOW}⚠️  DNS pre-flight check bypassed for '$d':${NC}"
-            echo -e "            Domain points to : ${RED}${resolved_ip:-Unresolved}${NC}"
-            echo -e "            Server Public IP : ${GREEN}${server_ip:-Unknown}${NC}"
-            echo -e "         ${YELLOW}Skipping Let's Encrypt request to avoid Rate-Limit lockouts.${NC}"
-            echo -e "         ${GRAY}Self-signed fallback certificate remains active.${NC}"
-            return 0
+        if [[ -n "$resolved_ip" ]] && [ ${#server_ips[@]} -gt 0 ]; then
+            for sip in "${server_ips[@]}"; do
+                if [[ "$resolved_ip" == "$sip" ]]; then
+                    match_found=1
+                    break
+                fi
+            done
+        fi
+
+        if [ "$match_found" -eq 1 ]; then
+            verified_domains+=("$d")
+        else
+            if [[ "$d" == "$domain" ]]; then
+                # Primary apex domain failed DNS check -> abort Let's Encrypt entirely
+                echo -e "         ${YELLOW}⚠️  DNS pre-flight check bypassed for primary domain '$d':${NC}"
+                echo -e "            Domain points to : ${RED}${resolved_ip:-Unresolved}${NC}"
+                echo -e "            Server Public IP : ${GREEN}${primary_server_ip}${NC}"
+                echo -e "         ${YELLOW}Skipping Let's Encrypt request to avoid Rate-Limit lockouts.${NC}"
+                echo -e "         ${GRAY}Self-signed fallback certificate remains active.${NC}"
+                return 0
+            else
+                # Optional subdomain (www or uploads) is unresolved -> skip only the subdomain, proceed with apex!
+                echo -e "         ${YELLOW}ℹ️  Subdomain '$d' DNS is ${RED}${resolved_ip:-Unresolved}${YELLOW} (expected ${GREEN}${primary_server_ip}${YELLOW}). Excluding '$d' from cert request.${NC}"
+            fi
         fi
     done
 
     local domain_args=()
-    for d in "${domains_to_cert[@]}"; do
+    for d in "${verified_domains[@]}"; do
         domain_args+=("-d" "$d")
     done
 
@@ -973,7 +1021,7 @@ issue_letsencrypt_ssl() {
     chown -R "$vhost_user:www-data" "$project_root/.well-known"
     chmod -R 755 "$project_root/.well-known"
 
-    echo -e "         DNS matches public server IP! Requesting official TLS certificate (Webroot)..."
+    echo -e "         DNS verified for [${verified_domains[*]}]! Requesting official TLS certificate..."
     if certbot certonly --webroot -w "$project_root" \
         --cert-name "$domain" \
         --non-interactive --agree-tos \
@@ -993,7 +1041,7 @@ issue_letsencrypt_ssl() {
             if nginx -t >/dev/null 2>&1; then
                 systemctl reload nginx
                 rm -f "$cert_file" "$key_file"
-                echo -e "         ${GREEN}✅ Let's Encrypt certificate cleanly bound for: ${domains_to_cert[*]}${NC}"
+                echo -e "         ${GREEN}✅ Let's Encrypt certificate cleanly bound for: ${verified_domains[*]}${NC}"
             else
                 # Revert to self-signed if syntax check fails
                 sed -i "s|ssl_certificate[[:space:]]\+$le_fullchain;|ssl_certificate     $cert_file;|g" "$nginx_conf"

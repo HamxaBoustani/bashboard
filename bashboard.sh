@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD - Enterprise VPS Management System
-# Version:      1.6.5 (Production Hardened: Auto-Refresh Static Cache Post-Task,
-#               First-Match SSH Sensor Sync, Dual SSL Sensor, Safe /proc Parser)
+# Version:      1.6.6 (Production Hardened: Kernel Interface-First Public IP,
+#               Auto-Refresh Static Cache, First-Match SSH Sensor, Dual SSL)
 # Architecture: Multi-Tier | Active Caching | 100% Absolute Column Alignment
-# Platform:     Linux (Ubuntu 22.04/24.04 LTS, Debian 11/12)
+# Platform:     Linux (Ubuntu 22.04/24.04/26.04 LTS, Debian 11/12)
 # ==============================================================================
 set -euo pipefail
 
@@ -137,6 +137,16 @@ safe_cmd() {
     fi
 }
 
+# Extracts direct public IPv4 from network interfaces (immune to outbound VPN/NAT routing)
+detect_interface_public_ip() {
+    if command -v ip >/dev/null 2>&1; then
+        ip -4 addr show scope global 2>/dev/null \
+            | awk '/inet / {split($2, a, "/"); print a[1]}' \
+            | grep -vE '^(10\.|127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.)' \
+            | head -n1 || true
+    fi
+}
+
 get_static_info() {
     local quiet_mode="${1:-}"
     if [[ "$quiet_mode" != "--quiet" ]]; then
@@ -167,14 +177,26 @@ get_static_info() {
         DISK_TYPE="HDD"
     fi
 
-    if [[ ! -f "$IP_CACHE_FILE" ]]; then
+    # Tier 1: Direct Kernel Network Interface Inspection (Instant & Immune to Outbound Proxy/NAT)
+    local iface_pub_ip
+    iface_pub_ip=$(detect_interface_public_ip)
+    [ -L "$IP_CACHE_FILE" ] && rm -f "$IP_CACHE_FILE" 2>/dev/null || true
+
+    if [[ "$iface_pub_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        PUBLIC_IP="$iface_pub_ip"
+        (
+            umask 022
+            echo "$iface_pub_ip" > "${IP_CACHE_FILE}.tmp"
+            mv -f "${IP_CACHE_FILE}.tmp" "$IP_CACHE_FILE"
+        ) 2>/dev/null || true
+    elif [[ ! -f "$IP_CACHE_FILE" ]]; then
+        # Tier 2 Fallback (Only for Cloud NAT instances like AWS EC2 with private-only NICs)
         PUBLIC_IP="Resolving..."
-        [ -L "$IP_CACHE_FILE" ] && rm -f "$IP_CACHE_FILE" 2>/dev/null || true
         if command -v curl >/dev/null 2>&1; then
             (
                 _ip=""
                 for _url in "https://api.ipify.org" "https://ifconfig.me" "https://icanhazip.com"; do
-                    _ip=$(curl -4 -s --connect-timeout 2 --max-time 2 "$_url" 2>/dev/null || true)
+                    _ip=$(curl -4 -s --noproxy '*' --connect-timeout 2 --max-time 2 "$_url" 2>/dev/null || true)
                     _ip=$(tr -d '[:space:]' <<< "$_ip")
                     if [[ "$_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
                         (
@@ -585,7 +607,7 @@ draw_dashboard() {
     local r_fmt="      %-16s: ${WHITE}%-21s${NC}${COL_MID}${GRAY}│${NC} %-16s: ${WHITE}%-20s${NC}\n"
 
     echo -e "${CYAN}┌────────────────────────────────────────────────────────────────────────────────────────────┐${NC}"
-    printf "   🚀 ${BOLD}${WHITE}%-50s${NC}    ${GREEN}Server Time: %-20s${NC}\n" "BASHBOARD (V1.6.5)" "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf "   🚀 ${BOLD}${WHITE}%-50s${NC}    ${GREEN}Server Time: %-20s${NC}\n" "BASHBOARD (V1.6.6)" "$(date '+%Y-%m-%d %H:%M:%S')"
     echo -e "${CYAN}├────────────────────────────────────────────────────────────────────────────────────────────┤${NC}"
 
     echo -e "   📋 ${PURPLE}${BOLD}SERVER INFORMATION${NC}"
