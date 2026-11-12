@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [02] Nginx Virtual Host & Architecture Deployer (TUI Edition)
-# Version:          1.8.1 (CIS & OWASP Hardened: Kernel Interface IP Discovery,
+# Version:          1.8.0 (CIS & OWASP Hardened: Kernel Interface IP Discovery,
 #                   Graceful Subdomain SSL Degradation, Zero-Mutation Webroot ACME)
 # Architecture:     Interactive TUI Configurator | Commercial Hosting Standard
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS

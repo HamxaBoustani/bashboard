@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [07] Virtual Host & Tenant Purge Engine (TUI Edition)
-# Version:          1.7.0 (Zero-Defect Enterprise: Manifest-Driven DB Discovery,
+# Version:          1.8.0 (Zero-Defect Enterprise: Manifest-Driven DB Discovery,
 #                   Orphaned Certbot Reference Sanitizer, Process-Lock Termination)
 # Architecture:     Interactive TUI Configurator | Destructive Safety Guardrails
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [12] Automated Google Drive Backup Engine
-# Version:          1.1.0 (Production SRE: Headless Cron Support, Dual-Tier DB
+# Version:          1.8.0 (Production SRE: Headless Cron Support, Dual-Tier DB
 #                   Dump Fallback, Non-Locking InnoDB, Remote Retention Pruning)
 # Architecture:     Interactive TUI & Headless Cron | Disaster Recovery Suite
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS

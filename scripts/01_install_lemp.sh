@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [01] Enterprise LEMP Stack Interactive TUI Installer
-# Version:          1.1.0 (Production Hardened: Dual-OS Sury/PPA Engine, Default
+# Version:          1.8.0 (Production Hardened: Dual-OS Sury/PPA Engine, Default
 #                   VHost Unlink, Dual-Auth MariaDB Socket+Pass, DNS Utilities)
 # Architecture:     Interactive TUI | Dynamic Discovery | Global Infrastructure Base
 # Platform:         Debian 11/12 (Bullseye/Bookworm), Ubuntu 20.04/22.04/24.04/26.04 LTS

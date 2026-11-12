@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [06] Enterprise Log Rotation & Disk Space Optimizer
-# Version:          1.7.0 (Production Hardened: State-Manifest Tenant Lookup,
+# Version:          1.8.0 (Production Hardened: State-Manifest Tenant Lookup,
 #                   Orphaned Drop-in Sanitizer, Journal Vacuum, Zero-Log-Drop)
 # Architecture:     Multi-Layer Log Rotation | Journal Vacuum | Zero-Crash SRE
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS

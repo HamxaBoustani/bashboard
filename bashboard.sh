@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD - Enterprise VPS Management System
-# Version:      1.6.6 (Production Hardened: Kernel Interface-First Public IP,
+# Version:      1.8.0 (Production Hardened: Kernel Interface-First Public IP,
 #               Auto-Refresh Static Cache, First-Match SSH Sensor, Dual SSL)
 # Architecture: Multi-Tier | Active Caching | 100% Absolute Column Alignment
 # Platform:     Linux (Ubuntu 22.04/24.04/26.04 LTS, Debian 11/12)

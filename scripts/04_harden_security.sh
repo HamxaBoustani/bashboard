@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [04] Enterprise Security Hardening (TUI Edition)
-# Version:          1.0.0 (Production Hardened: Anti-Lockout Sudoer Sentinel,
+# Version:          1.8.0 (Production Hardened: Anti-Lockout Sudoer Sentinel,
 #                   Ubuntu 24.04+ ssh.socket & /run/sshd Guard, python3-systemd)
 # Architecture:     Interactive DevSecOps Panel | Zero-Lockout | CIS Aligned
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS

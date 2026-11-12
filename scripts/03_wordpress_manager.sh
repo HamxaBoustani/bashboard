@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [03] WordPress Site Manager (Enterprise TUI Edition)
-# Version:          1.9.0 (Production Hardened: Multi-PHP CLI Binary Pinning,
+# Version:          1.8.0 (Production Hardened: Multi-PHP CLI Binary Pinning,
 #                   Automated DISABLE_WP_CRON Sync, Intelligent Loopback Checks)
 # Architecture:     2-Column Symmetrical TUI | Live Telemetry | Disaster Recovery
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
