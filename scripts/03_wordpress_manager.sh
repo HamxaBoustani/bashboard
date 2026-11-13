@@ -47,7 +47,7 @@ ensure_wp_cli() {
 
         if curl -fsSL -o "$tmp_wp" https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar; then
             if php "$tmp_wp" --info >/dev/null 2>&1; then
-                chmod +x "$tmp_wp"
+                chmod 755 "$tmp_wp"
                 mv "$tmp_wp" /usr/local/bin/wp
                 echo -e "${GREEN}✅ WP-CLI globally installed and verified.${NC}"
                 sleep 1

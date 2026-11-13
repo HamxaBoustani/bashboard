@@ -547,7 +547,7 @@ if [ "$INSTALL_WPCLI" -eq 1 ]; then
             exit 1
         fi
         
-        chmod +x "$tmp_wp"
+        chmod 755 "$tmp_wp"
         mv "$tmp_wp" /usr/local/bin/wp
     '
 fi
