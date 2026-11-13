@@ -42,6 +42,13 @@ if [ "$TERM_COLS" -lt 95 ]; then
     sleep 2
 fi
 
+# Override clear globally & export to all child modules (Preserves scrollback buffer)
+clear() {
+    tput rmcup 2>/dev/null || true
+    command clear -x 2>/dev/null || command clear
+}
+export -f clear
+
 # ------------------------------------------------------------------------------
 # 2. TRAP HANDLER & SYSTEM ACCESS CHECK
 # ------------------------------------------------------------------------------
