@@ -381,6 +381,10 @@ if [ "$APPLY_UFW" -eq 1 ]; then
     ufw allow 80/tcp comment "HTTP Web Ingress" >/dev/null 2>&1
     ufw allow 443/tcp comment "HTTPS Web Ingress" >/dev/null 2>&1
 
+    # Remove redundant named application profiles now that explicit port rules are active
+    [ "$SSH_PORT" -eq 22 ] && ufw delete allow 'OpenSSH' >/dev/null 2>&1 || true
+    ufw delete allow 'Nginx Full' >/dev/null 2>&1 || true
+
     # Enable firewall non-interactively
     echo "y" | ufw enable >/dev/null 2>&1 || true
     echo -e "   ${GREEN}✅ UFW active: Ports ${SSH_PORT}/tcp (SSH), 80/tcp (HTTP), 443/tcp (HTTPS) confirmed open.${NC}"

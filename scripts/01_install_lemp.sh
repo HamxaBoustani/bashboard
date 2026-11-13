@@ -375,7 +375,8 @@ EOF
     systemctl reload nginx >> "$INSTALL_LOG" 2>&1 || true
 
     if command -v ufw >/dev/null 2>&1; then
-        ufw allow 'Nginx Full' >> "$INSTALL_LOG" 2>&1 || true
+        ufw allow 80/tcp comment "HTTP Web Ingress" >> "$INSTALL_LOG" 2>&1 || true
+        ufw allow 443/tcp comment "HTTPS Web Ingress" >> "$INSTALL_LOG" 2>&1 || true
     fi
 fi
 
