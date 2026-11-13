@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [04] Enterprise Security Hardening (TUI Edition)
-# Version:          1.8.0 (Production Hardened: Anti-Lockout Sudoer Sentinel,
-#                   Ubuntu 24.04+ ssh.socket & /run/sshd Guard, python3-systemd)
+# Version:          1.8.0 (Production Hardened: Dual Anti-Lockout Sentinel for
+#                   Sudoer & Root SSH Keys, Ubuntu 24.04+ ssh.socket, Fail2Ban)
 # Architecture:     Interactive DevSecOps Panel | Zero-Lockout | CIS Aligned
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -36,7 +36,7 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# 2. RUNTIME TELEMETRY & ANTI-LOCKOUT HELPERS
+# 2. RUNTIME TELEMETRY & DUAL ANTI-LOCKOUT HELPERS
 # ------------------------------------------------------------------------------
 # Authoritative SSH port detection supporting systemd socket-activation (Ubuntu 24.04+)
 detect_ssh_port() {
@@ -56,7 +56,7 @@ if [[ ! "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt
     SSH_PORT=22
 fi
 
-# Anti-Lockout Check: Verify if at least one active non-root sudoer user exists
+# Anti-Lockout Gate 1: Verify if at least one active non-root sudoer user exists
 has_active_sudoer() {
     local u sh
     for u in $(getent group sudo 2>/dev/null | awk -F: '{print $4}' | tr ',' ' ') \
@@ -69,6 +69,11 @@ has_active_sudoer() {
         fi
     done
     return 1
+}
+
+# Anti-Lockout Gate 2: Verify if root has at least one authorized public SSH key configured
+has_root_ssh_key() {
+    [ -f "/root/.ssh/authorized_keys" ] && grep -qE '^(ssh-|ecdsa-|sk-)' "/root/.ssh/authorized_keys" 2>/dev/null
 }
 
 get_current_ssh_policy() {
@@ -89,10 +94,14 @@ APPLY_SSH=1
 APPLY_UFW=1
 APPLY_FAIL2BAN=1
 
-# Preserve existing strict 'no' policy if already active and safe; otherwise default to 'prohibit-password'
-SSH_ROOT_POLICY="prohibit-password"
+# Determine safe initial SSH Root Policy based on current server state
 if [[ "$(get_current_ssh_policy)" == "no" ]] && has_active_sudoer; then
     SSH_ROOT_POLICY="no"
+elif has_active_sudoer || has_root_ssh_key; then
+    SSH_ROOT_POLICY="prohibit-password"
+else
+    # Server only has root user without SSH keys (password-only root) -> prevent lockout!
+    SSH_ROOT_POLICY="yes"
 fi
 
 toggle_status() {
@@ -194,7 +203,7 @@ while true; do
         4) APPLY_FAIL2BAN=$(( 1 - APPLY_FAIL2BAN )) ;;
         5)
             if [ "$SSH_ROOT_POLICY" == "prohibit-password" ]; then
-                # Anti-Lockout Verification Gate
+                # Anti-Lockout Gate 1: Require sudoer before setting 'no'
                 if has_active_sudoer; then
                     SSH_ROOT_POLICY="no"
                 else
@@ -203,8 +212,22 @@ while true; do
                     echo -e "   ${GRAY}Create a sudoer user first to avoid permanent terminal lockout.${NC}"
                     sleep 3
                 fi
+            elif [ "$SSH_ROOT_POLICY" == "no" ]; then
+                if has_active_sudoer || has_root_ssh_key; then
+                    SSH_ROOT_POLICY="prohibit-password"
+                else
+                    SSH_ROOT_POLICY="yes"
+                fi
             else
-                SSH_ROOT_POLICY="prohibit-password"
+                # Currently 'yes'
+                if has_active_sudoer || has_root_ssh_key; then
+                    SSH_ROOT_POLICY="prohibit-password"
+                else
+                    echo -e "\n   ${RED}⚠️  [LOCKOUT RISK] Cannot disable Root Password Login!${NC}"
+                    echo -e "   ${YELLOW}Neither a non-root sudoer user nor a root SSH key (/root/.ssh/authorized_keys) was found.${NC}"
+                    echo -e "   ${GRAY}Add an SSH key or create a sudoer user first to avoid locking yourself out.${NC}"
+                    sleep 3.5
+                fi
             fi
             ;;
         9)
@@ -283,7 +306,7 @@ EOF
 fi
 
 # ------------------------------------------------------------------------------
-# 6.2 OPENSSH DAEMON POLICIES (First-Match-Wins Priority)
+# 6.2 OPENSSH DAEMON POLICIES (First-Match-Wins Priority & Dual Anti-Lockout)
 # ------------------------------------------------------------------------------
 if [ "$APPLY_SSH" -eq 1 ]; then
     echo -e "\n${BLUE}--- [2/4] Securing OpenSSH Daemon Configuration ---${NC}"
@@ -291,9 +314,15 @@ if [ "$APPLY_SSH" -eq 1 ]; then
     mkdir -p "$SSH_DROPIN_DIR"
     mkdir -p -m 0755 /run/sshd 2>/dev/null || true
 
-    # Final safety verification before writing 'no'
+    # Final safety verification Gate 1: 'no' strictly requires an active non-root sudoer
     if [ "$SSH_ROOT_POLICY" == "no" ] && ! has_active_sudoer; then
         SSH_ROOT_POLICY="prohibit-password"
+    fi
+
+    # Final safety verification Gate 2: 'prohibit-password' requires either a sudoer OR root SSH keys
+    if [ "$SSH_ROOT_POLICY" == "prohibit-password" ] && ! has_active_sudoer && ! has_root_ssh_key; then
+        echo -e "   ${YELLOW}⚠️  [LOCKOUT GUARD] No sudoer user and no root SSH key found! Keeping root password login enabled.${NC}"
+        SSH_ROOT_POLICY="yes"
     fi
 
     # Named '00-' to guarantee execution ahead of cloud-init (e.g., 50-cloud-init.conf)
