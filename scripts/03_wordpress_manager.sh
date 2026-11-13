@@ -492,11 +492,12 @@ while true; do
         2)
             echo ""
             if [ -f "$WP_PATH/.maintenance" ]; then
-                wp_run maintenance-mode deactivate
-                echo -e "${GREEN}✅ Maintenance mode deactivated. Site is LIVE.${NC}"
+                rm -f "$WP_PATH/.maintenance"
+                wp_run option delete core_updater.lock >/dev/null 2>&1 || true
+                echo -e "${GREEN}✅ Maintenance mode deactivated & update locks cleared. Site is LIVE.${NC}"
             else
-                wp_run maintenance-mode activate
-                echo -e "${YELLOW}⚠️  Maintenance mode activated. Site is OFFLINE to visitors.${NC}"
+                printf "<?php \$upgrading = time(); ?>\n" > "$WP_PATH/.maintenance"
+                echo -e "${YELLOW}⚠️  Persistent maintenance mode activated (No 10m timeout). Site is OFFLINE.${NC}"
             fi
             enforce_permissions
             sleep 1.5
