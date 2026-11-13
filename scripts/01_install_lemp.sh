@@ -508,7 +508,7 @@ if [ "$INSTALL_REDIS" -eq 1 ]; then
 
 # Bashboard Redis Security (Blind-Keyspace & Admin Command Lockdown)
 rename-command KEYS ""
-rename-command SCAN ""
+# rename-command SCAN ""
 rename-command MONITOR ""
 rename-command CONFIG ""
 rename-command SHUTDOWN ""
