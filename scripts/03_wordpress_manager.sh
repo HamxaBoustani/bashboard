@@ -234,7 +234,7 @@ wp_run() {
             -d open_basedir="/var/www/${SELECTED_DOMAIN}/:/usr/local/bin/wp:/usr/share/zoneinfo/:/dev/urandom" \
             -d disable_functions="exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,show_source,highlight_file,proc_get_status,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid" \
             -d error_reporting="E_ALL & ~E_WARNING & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE" \
-            /usr/local/bin/wp --no-color --path="$WP_PATH" "$@"
+            /usr/local/bin/wp --path="$WP_PATH" "$@"
     )
 }
 
