@@ -314,7 +314,8 @@ if [ -f "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ]; then
 fi
 
 LOCK_FILE="/var/www/${DOMAIN}/tmp/cron.lock"
-OPEN_BASEDIR="/var/www/${DOMAIN}/:/usr/local/bin/wp:phar:///usr/local/bin/wp:/usr/share/zoneinfo/:/dev/urandom"
+# OPEN_BASEDIR="/var/www/${DOMAIN}/:/usr/local/bin/wp:phar:///usr/local/bin/wp:/usr/share/zoneinfo/:/dev/urandom"
+OPEN_BASEDIR="/var/www/${DOMAIN}/:/usr/local/bin/wp:/usr/share/zoneinfo/:/dev/urandom"
 DISABLED_FUNCS="exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,show_source,highlight_file,proc_get_status,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid"
 
 cd "${WP_PATH}" 2>/dev/null || exit 1
@@ -405,7 +406,7 @@ inspect_and_test_cron() {
 
     echo -e "\n${BLUE}[2/3] Executing Overdue & Due Tasks Immediately (--due-now)...${NC}"
     local run_output
-    run_output=$(wp_run cron event run --due-now 2>&1 || true)
+    # run_output=$(wp_run cron event run --due-now 2>&1 || true)
     run_output=$(wp_run cron event run --due-now 2>&1 | grep -vE "^(PHP )?(Deprecated|Notice|Warning):.*phar:///usr/local/bin/wp" || true)
     if [ -n "$run_output" ]; then
         echo -e "${GRAY}$run_output${NC}"
