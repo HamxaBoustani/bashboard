@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [03] WordPress Site Manager (Enterprise TUI Edition)
-# Version:          1.8.0 (Zero-Trust Hardened: CLI/Cron open_basedir & Function
-#                   Sandbox, Symlink-Safe Permissions, Stdin Password Pipe)
+# Version:          1.8.0 (Zero-Trust Hardened: CWD-Isolated CLI/Cron Sandbox,
+#                   Symlink-Safe Permissions, Stdin Password Pipe, Non-Locking Dump)
 # Architecture:     2-Column Symmetrical TUI | Live Telemetry | Disaster Recovery
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -199,7 +199,8 @@ get_site_php_bin() {
 
 SITE_PHP_BIN=$(get_site_php_bin)
 
-# C2 & C3 Hardened WP-CLI runner: Drops root privileges AND enforces open_basedir + disable_functions in CLI
+# C2 & C3 Hardened WP-CLI runner: Changes CWD to $WP_PATH, drops root privileges,
+# locks include_path, and enforces open_basedir + disable_functions on CLI!
 wp_run() {
     local u
     u=$(get_vhost_user)
@@ -210,14 +211,18 @@ wp_run() {
     mkdir -p "/var/www/$SELECTED_DOMAIN/tmp/wp-cache" 2>/dev/null || true
     chown "$u:$u" "/var/www/$SELECTED_DOMAIN/tmp/wp-cache" 2>/dev/null || true
 
-    runuser -u "$u" -- env HOME="/var/www/$SELECTED_DOMAIN" \
-        WP_CLI_CACHE_DIR="/var/www/$SELECTED_DOMAIN/tmp/wp-cache" \
-        "$SITE_PHP_BIN" \
-        -d memory_limit=512M \
-        -d open_basedir="/var/www/${SELECTED_DOMAIN}/:/usr/local/bin/wp:/usr/share/zoneinfo/:/dev/urandom" \
-        -d disable_functions="exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,show_source,highlight_file,proc_get_status,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid" \
-        -d error_reporting="E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE" \
-        /usr/local/bin/wp --path="$WP_PATH" "$@"
+    (
+        cd "$WP_PATH"
+        runuser -u "$u" -- env HOME="/var/www/$SELECTED_DOMAIN" \
+            WP_CLI_CACHE_DIR="/var/www/$SELECTED_DOMAIN/tmp/wp-cache" \
+            "$SITE_PHP_BIN" \
+            -d memory_limit=512M \
+            -d include_path=".:${WP_PATH}" \
+            -d open_basedir="/var/www/${SELECTED_DOMAIN}/:/usr/local/bin/wp:phar:///usr/local/bin/wp:/usr/share/zoneinfo/:/dev/urandom" \
+            -d disable_functions="exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,show_source,highlight_file,proc_get_status,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid" \
+            -d error_reporting="E_ALL & ~E_WARNING & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE" \
+            /usr/local/bin/wp --path="$WP_PATH" "$@"
+    )
 }
 
 get_cfg_file() {
@@ -296,22 +301,28 @@ if [ -f "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ]; then
 fi
 
 LOCK_FILE="/var/www/${DOMAIN}/tmp/cron.lock"
-OPEN_BASEDIR="/var/www/${DOMAIN}/:/usr/local/bin/wp:/usr/share/zoneinfo/:/dev/urandom"
+OPEN_BASEDIR="/var/www/${DOMAIN}/:/usr/local/bin/wp:phar:///usr/local/bin/wp:/usr/share/zoneinfo/:/dev/urandom"
 DISABLED_FUNCS="exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,show_source,highlight_file,proc_get_status,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid"
+
+cd "${WP_PATH}" 2>/dev/null || exit 1
 
 # Execute inside a single atomic flock capsule with full PHP CLI sandboxing (Resolves C3)
 /usr/bin/flock -n "${LOCK_FILE}" -c "
     \"${PHP_BIN}\" -d memory_limit=512M \
+        -d include_path='.:${WP_PATH}' \
         -d open_basedir='${OPEN_BASEDIR}' \
         -d disable_functions='${DISABLED_FUNCS}' \
-        -d error_reporting='E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE' \
+        -d error_reporting='E_ALL & ~E_WARNING & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE' \
         /usr/local/bin/wp cron event run --due-now --path='${WP_PATH}' --quiet 2>/dev/null || true
 
-    if \"${PHP_BIN}\" -d open_basedir='${OPEN_BASEDIR}' -d disable_functions='${DISABLED_FUNCS}' \
+    if \"${PHP_BIN}\" -d include_path='.:${WP_PATH}' -d open_basedir='${OPEN_BASEDIR}' -d disable_functions='${DISABLED_FUNCS}' \
+        -d error_reporting='E_ALL & ~E_WARNING & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE' \
         /usr/local/bin/wp --path='${WP_PATH}' cli has-command action-scheduler >/dev/null 2>&1; then
         \"${PHP_BIN}\" -d memory_limit=512M \
+            -d include_path='.:${WP_PATH}' \
             -d open_basedir='${OPEN_BASEDIR}' \
             -d disable_functions='${DISABLED_FUNCS}' \
+            -d error_reporting='E_ALL & ~E_WARNING & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE' \
             /usr/local/bin/wp action-scheduler run --path='${WP_PATH}' --batch-size=100 --quiet 2>/dev/null || true
     fi
 "
