@@ -910,7 +910,7 @@ chmod 750 "$logs_dir"
 # 5. Dedicated Logrotate Drop-in: Nginx logs rotate as www-data; PHP logs rotate via copytruncate
 cat > "/etc/logrotate.d/vhost-$DOMAIN" <<EOF
 # Bashboard Dedicated Logrotate Policy for $DOMAIN
-$logs_dir/*access.log $logs_dir/*error.log {
+$logs_dir/nginx_*.log $logs_dir/uploads_*.log {
     su www-data $vhost_user
     daily
     missingok

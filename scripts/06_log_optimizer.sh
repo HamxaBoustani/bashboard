@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [06] Enterprise Log Rotation & Disk Space Optimizer
-# Version:          1.8.0 (Zero-Trust Hardened: CVE-2016-1247 Symlink-Safe Logs
-#                   750 www-data:$vhost_user, Clean USR1 Postrotate, Vacuum)
+# Version:          1.8.0 (Zero-Trust Hardened: Non-Overlapping Glob Patterns,
+#                   CVE-2016-1247 Symlink-Safe Logs, Accurate Journal Telemetry)
 # Architecture:     Multi-Layer Log Rotation | Journal Vacuum | Zero-Crash SRE
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -73,7 +73,9 @@ get_size() {
 
 get_journal_size() {
     if command -v journalctl >/dev/null 2>&1; then
-        journalctl --disk-usage 2>/dev/null | awk '{print $NF}' || echo "Unknown"
+        local j_out
+        j_out=$(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)?[BKMGT]' | head -n1 || true)
+        echo "${j_out:-0B}"
     else
         echo "N/A"
     fi
@@ -236,7 +238,6 @@ if [ "$OPTIMIZE_VHOSTS" -eq 1 ]; then
             if ! id -u "$vhost_user" >/dev/null 2>&1 || [[ ! "$vhost_user" =~ ^v_[a-z0-9_]+$ ]]; then
                 vhost_user="www-data"
             else
-                # Ensure root-anchored parent & www-data group membership (C1 & C2)
                 usermod -a -G "$vhost_user" www-data 2>/dev/null || true
                 chown "root:$vhost_user" "$d" 2>/dev/null || true
                 chmod 750 "$d" 2>/dev/null || true
@@ -246,7 +247,7 @@ if [ "$OPTIMIZE_VHOSTS" -eq 1 ]; then
             chown "www-data:$vhost_user" "$logs_dir" 2>/dev/null || true
             chmod 750 "$logs_dir" 2>/dev/null || true
 
-            for nlog in "$logs_dir"/*access.log "$logs_dir"/*error.log; do
+            for nlog in "$logs_dir"/nginx_*.log "$logs_dir"/uploads_*.log; do
                 if [ -f "$nlog" ] && [ ! -L "$nlog" ]; then
                     chown "www-data:$vhost_user" "$nlog" 2>/dev/null || true
                     chmod 640 "$nlog" 2>/dev/null || true
@@ -259,9 +260,10 @@ if [ "$OPTIMIZE_VHOSTS" -eq 1 ]; then
                 fi
             done
 
+            # Disjoint glob patterns (nginx_*.log / uploads_*.log vs php_*.log) prevent duplicate entry errors
             cat > "/etc/logrotate.d/vhost-$domain_name" <<EOF
 # Bashboard Dedicated Logrotate Policy for $domain_name (CVE-2016-1247 Safe)
-$logs_dir/*access.log $logs_dir/*error.log {
+$logs_dir/nginx_*.log $logs_dir/uploads_*.log {
     su www-data $vhost_user
     ${ROTATE_FREQUENCY}
     missingok
