@@ -406,6 +406,7 @@ inspect_and_test_cron() {
     echo -e "\n${BLUE}[2/3] Executing Overdue & Due Tasks Immediately (--due-now)...${NC}"
     local run_output
     run_output=$(wp_run cron event run --due-now 2>&1 || true)
+    run_output=$(wp_run cron event run --due-now 2>&1 | grep -vE "^(PHP )?(Deprecated|Notice|Warning):.*phar:///usr/local/bin/wp" || true)
     if [ -n "$run_output" ]; then
         echo -e "${GRAY}$run_output${NC}"
     else
