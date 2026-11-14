@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [03] WordPress Site Manager (Enterprise TUI Edition)
-# Version:          1.8.0 (Production Hardened: Multi-PHP CLI Binary Pinning,
-#                   Automated DISABLE_WP_CRON Sync, Intelligent Loopback Checks)
+# Version:          1.8.0 (Zero-Trust Hardened: CLI/Cron open_basedir & Function
+#                   Sandbox, Symlink-Safe Permissions, Stdin Password Pipe)
 # Architecture:     2-Column Symmetrical TUI | Live Telemetry | Disaster Recovery
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -61,6 +61,8 @@ ensure_wp_cli() {
             echo -e "${RED}❌ [FATAL] Failed to download WP-CLI from GitHub repository.${NC}" >&2
             exit 1
         fi
+    else
+        chmod 755 /usr/local/bin/wp 2>/dev/null || true
     fi
 }
 ensure_wp_cli
@@ -137,7 +139,7 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# 5. ENVIRONMENT PATH RESOLUTION, PHP PINNING & SAFE RUNNERS
+# 5. ENVIRONMENT PATH RESOLUTION, PHP PINNING & SANDBOXED RUNNERS (Resolves C1 & C3)
 # ------------------------------------------------------------------------------
 TARGET_DIR="/var/www/$SELECTED_DOMAIN/public_html"
 [[ ! -d "$TARGET_DIR" ]] && TARGET_DIR="/var/www/$SELECTED_DOMAIN"
@@ -150,26 +152,40 @@ else
     SITE_LAYOUT="Standard Layout"
 fi
 
+get_authoritative_state_file() {
+    if [ -f "/etc/bashboard/sites/${SELECTED_DOMAIN}.state" ] && [ ! -L "/etc/bashboard/sites/${SELECTED_DOMAIN}.state" ]; then
+        echo "/etc/bashboard/sites/${SELECTED_DOMAIN}.state"
+    elif [ -f "/var/www/$SELECTED_DOMAIN/.bashboard-state" ] && [ ! -L "/var/www/$SELECTED_DOMAIN/.bashboard-state" ] && [ "$(stat -c '%u' "/var/www/$SELECTED_DOMAIN/.bashboard-state" 2>/dev/null)" = "0" ]; then
+        echo "/var/www/$SELECTED_DOMAIN/.bashboard-state"
+    else
+        echo ""
+    fi
+}
+
 get_vhost_user() {
     local u=""
-    if [ -f "/var/www/$SELECTED_DOMAIN/.bashboard-state" ]; then
-        u=$(grep -E "^TENANT_USER=" "/var/www/$SELECTED_DOMAIN/.bashboard-state" 2>/dev/null | cut -d'=' -f2- || true)
+    local sf
+    sf=$(get_authoritative_state_file)
+    if [[ -n "$sf" ]]; then
+        u=$(grep -E "^TENANT_USER=" "$sf" 2>/dev/null | cut -d'=' -f2- || true)
     fi
     if [[ -z "$u" ]] && [ -d "$TARGET_DIR" ]; then
         u=$(stat -c '%U' "$TARGET_DIR" 2>/dev/null || true)
     fi
-    if [[ -z "$u" || "$u" == "root" ]]; then
-        u=$(stat -c '%U' "/var/www/$SELECTED_DOMAIN" 2>/dev/null || true)
+    # Verify tenant user strictly matches ^v_ and its home directory matches the site
+    if [[ "$u" =~ ^v_[a-z0-9_]+$ ]] && [ "$u" != "v_pma_sys" ] && [[ "$(getent passwd "$u" 2>/dev/null | cut -d: -f6)" == "/var/www/$SELECTED_DOMAIN" ]]; then
+        echo "$u"
+    else
+        echo ""
     fi
-    echo "$u"
 }
 
-# Resolves the exact PHP CLI binary matching the site's dedicated FPM pool
 get_site_php_bin() {
     local ver=""
-    local state_file="/var/www/$SELECTED_DOMAIN/.bashboard-state"
-    if [ -f "$state_file" ]; then
-        ver=$(grep -E "^PHP_VER=" "$state_file" 2>/dev/null | cut -d'=' -f2- || true)
+    local sf
+    sf=$(get_authoritative_state_file)
+    if [[ -n "$sf" ]]; then
+        ver=$(grep -E "^PHP_VER=" "$sf" 2>/dev/null | cut -d'=' -f2- || true)
     fi
     if [[ -z "$ver" ]] && [ -f "/etc/nginx/sites-available/$SELECTED_DOMAIN" ]; then
         ver=$(grep -oE 'php[0-9]+\.[0-9]+-fpm' "/etc/nginx/sites-available/$SELECTED_DOMAIN" 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+' || true)
@@ -183,17 +199,24 @@ get_site_php_bin() {
 
 SITE_PHP_BIN=$(get_site_php_bin)
 
-# C2 Hardened WP-CLI runner: Drops root privileges safely with runuser & exact PHP version
+# C2 & C3 Hardened WP-CLI runner: Drops root privileges AND enforces open_basedir + disable_functions in CLI
 wp_run() {
     local u
     u=$(get_vhost_user)
-    if [[ ! "$u" =~ ^v_ ]]; then
-        echo -e "   ${RED}❌ [CRITICAL] Refusing to execute WP-CLI as non-tenant user ($u).${NC}" >&2
+    if [[ -z "$u" || ! "$u" =~ ^v_ ]]; then
+        echo -e "   ${RED}❌ [CRITICAL] Refusing to execute WP-CLI: Invalid or unverified tenant user ($u).${NC}" >&2
         return 1
     fi
+    mkdir -p "/var/www/$SELECTED_DOMAIN/tmp/wp-cache" 2>/dev/null || true
+    chown "$u:$u" "/var/www/$SELECTED_DOMAIN/tmp/wp-cache" 2>/dev/null || true
+
     runuser -u "$u" -- env HOME="/var/www/$SELECTED_DOMAIN" \
         WP_CLI_CACHE_DIR="/var/www/$SELECTED_DOMAIN/tmp/wp-cache" \
-        "$SITE_PHP_BIN" -d memory_limit=512M -d error_reporting="E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE" \
+        "$SITE_PHP_BIN" \
+        -d memory_limit=512M \
+        -d open_basedir="/var/www/${SELECTED_DOMAIN}/:/usr/local/bin/wp:/usr/share/zoneinfo/:/dev/urandom" \
+        -d disable_functions="exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,show_source,highlight_file,proc_get_status,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid" \
+        -d error_reporting="E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE" \
         /usr/local/bin/wp --path="$WP_PATH" "$@"
 }
 
@@ -207,44 +230,49 @@ get_cfg_file() {
     fi
 }
 
+# Symlink-Safe Permission Enforcer (Resolves C1, C2 & W1)
 enforce_permissions() {
     local site_root="/var/www/$SELECTED_DOMAIN"
     local vhost_user
     vhost_user=$(get_vhost_user)
 
-    if [ -d "$site_root" ] && [[ "$vhost_user" =~ ^v_ ]]; then
-        chown "$vhost_user:www-data" "$site_root"
+    if [ -d "$site_root" ] && [[ -n "$vhost_user" ]]; then
+        usermod -a -G "$vhost_user" www-data 2>/dev/null || true
+
+        # Root-anchored parent directory prevents .bashboard-state unlinking (C1)
+        chown "root:$vhost_user" "$site_root"
         chmod 750 "$site_root"
 
-        chown -R "$vhost_user:$vhost_user" "$TARGET_DIR"
-        find "$TARGET_DIR" -type d -exec chmod 755 {} + 2>/dev/null || true
-        find "$TARGET_DIR" -type f -exec chmod 644 {} + 2>/dev/null || true
+        # Logs directory owned by www-data:$vhost_user (750) prevents symlink privilege escalation (C2)
+        if [ -d "$site_root/logs" ] && [ ! -L "$site_root/logs" ]; then
+            chown "www-data:$vhost_user" "$site_root/logs"
+            chmod 750 "$site_root/logs"
+        fi
+
+        # Execute chmod inside tenant context to neutralize root symlink race conditions (W1)
+        chown -h -R "$vhost_user:$vhost_user" "$TARGET_DIR" 2>/dev/null || true
+        runuser -u "$vhost_user" -- find "$TARGET_DIR" -type d -exec chmod 755 {} + 2>/dev/null || true
+        runuser -u "$vhost_user" -- find "$TARGET_DIR" -type f -exec chmod 644 {} + 2>/dev/null || true
 
         local cfg
         cfg=$(get_cfg_file)
-        if [[ -n "$cfg" && -f "$cfg" ]]; then
+        if [[ -n "$cfg" && -f "$cfg" && ! -L "$cfg" ]]; then
             chown "$vhost_user:$vhost_user" "$cfg"
             chmod 600 "$cfg" 2>/dev/null || true
-        fi
-
-        if [ -d "$site_root/logs" ]; then
-            chown -R "$vhost_user:www-data" "$site_root/logs"
-            chmod 770 "$site_root/logs"
         fi
     fi
 }
 
 # ------------------------------------------------------------------------------
-# 6. CRON RUNNER ASSERTION & SCHEDULER ORCHESTRATION
+# 6. CRON RUNNER ASSERTION & SCHEDULER ORCHESTRATION (Resolves C3 & W3)
 # ------------------------------------------------------------------------------
 ensure_cron_runner() {
     local runner="/usr/local/bin/bashboard-cron-runner"
-    # Idempotent overwrite guarantees runner always stays in sync with multi-PHP resolution
     cat << 'EOF' > "$runner"
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD CRON RUNNER ENGINE
-# Architecture: Single Lock Capsule, Multi-PHP Aware, Action Scheduler Sync
+# Architecture: Single Lock Capsule, Multi-PHP Aware, CLI Sandboxed (C3 Fixed)
 # ==============================================================================
 set -e
 
@@ -257,8 +285,10 @@ if [[ -z "$DOMAIN" || -z "$WP_PATH" ]]; then
 fi
 
 PHP_BIN="/usr/bin/php"
-STATE_FILE="/var/www/${DOMAIN}/.bashboard-state"
-if [ -f "$STATE_FILE" ]; then
+STATE_FILE="/etc/bashboard/sites/${DOMAIN}.state"
+[ ! -f "$STATE_FILE" ] && STATE_FILE="/var/www/${DOMAIN}/.bashboard-state"
+
+if [ -f "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ]; then
     VER=$(grep -E "^PHP_VER=" "$STATE_FILE" 2>/dev/null | cut -d'=' -f2- || true)
     if [[ -n "$VER" && -x "/usr/bin/php${VER}" ]]; then
         PHP_BIN="/usr/bin/php${VER}"
@@ -266,15 +296,22 @@ if [ -f "$STATE_FILE" ]; then
 fi
 
 LOCK_FILE="/var/www/${DOMAIN}/tmp/cron.lock"
+OPEN_BASEDIR="/var/www/${DOMAIN}/:/usr/local/bin/wp:/usr/share/zoneinfo/:/dev/urandom"
+DISABLED_FUNCS="exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,show_source,highlight_file,proc_get_status,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid"
 
-# Execute inside a single atomic flock capsule to eliminate overlaps
+# Execute inside a single atomic flock capsule with full PHP CLI sandboxing (Resolves C3)
 /usr/bin/flock -n "${LOCK_FILE}" -c "
-    \"${PHP_BIN}\" -d memory_limit=512M -d error_reporting='E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE' \
+    \"${PHP_BIN}\" -d memory_limit=512M \
+        -d open_basedir='${OPEN_BASEDIR}' \
+        -d disable_functions='${DISABLED_FUNCS}' \
+        -d error_reporting='E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE' \
         /usr/local/bin/wp cron event run --due-now --path='${WP_PATH}' --quiet 2>/dev/null || true
 
-    # Native WP-CLI check: uses official 'cli has-command'
-    if \"${PHP_BIN}\" /usr/local/bin/wp --path='${WP_PATH}' cli has-command action-scheduler >/dev/null 2>&1; then
+    if \"${PHP_BIN}\" -d open_basedir='${OPEN_BASEDIR}' -d disable_functions='${DISABLED_FUNCS}' \
+        /usr/local/bin/wp --path='${WP_PATH}' cli has-command action-scheduler >/dev/null 2>&1; then
         \"${PHP_BIN}\" -d memory_limit=512M \
+            -d open_basedir='${OPEN_BASEDIR}' \
+            -d disable_functions='${DISABLED_FUNCS}' \
             /usr/local/bin/wp action-scheduler run --path='${WP_PATH}' --batch-size=100 --quiet 2>/dev/null || true
     fi
 "
@@ -297,7 +334,6 @@ toggle_system_wpcron() {
         echo -e "   Disabling Linux Crontab for ${YELLOW}${domain}${NC}..."
         rm -f "$cron_file"
         wp_run config set DISABLE_WP_CRON false --raw --skip-plugins --skip-themes >/dev/null 2>&1 || true
-        enforce_permissions
         echo -e "   ${YELLOW}● Crontab removed: ${cron_file}${NC}"
         echo -e "   ${GREEN}✅ Restored web-triggered WP-Cron (DISABLE_WP_CRON = false).${NC}"
     else
@@ -309,7 +345,7 @@ toggle_system_wpcron() {
 
         cat > "$cron_file" <<EOF
 # Bashboard Automated WP-Cron for $domain
-# Runs strictly as $vhost_user with isolated execution envelopes
+# Runs strictly as $vhost_user with sandboxed CLI execution envelopes
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 HOME=/var/www/$domain
@@ -319,7 +355,6 @@ WP_CLI_CACHE_DIR=/var/www/$domain/tmp/wp-cache
 EOF
         chmod 644 "$cron_file"
         wp_run config set DISABLE_WP_CRON true --raw --skip-plugins --skip-themes >/dev/null 2>&1 || true
-        enforce_permissions
 
         echo -e "   ${GREEN}✅ Global Runner Verified : ${WHITE}/usr/local/bin/bashboard-cron-runner${NC} (${SITE_PHP_BIN})"
         echo -e "   ${GREEN}✅ Linux Crontab deployed : ${CYAN}$cron_file${NC} (User: ${WHITE}$vhost_user${NC}, Delay: ${YELLOW}${delay}s${NC})"
@@ -330,7 +365,7 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# 7. CRON HEALTH DIAGNOSTICS & TEST RUNNER (Intelligent Verification)
+# 7. CRON HEALTH DIAGNOSTICS & TEST RUNNER
 # ------------------------------------------------------------------------------
 inspect_and_test_cron() {
     clear
@@ -357,7 +392,6 @@ inspect_and_test_cron() {
     local cur_cfg
     cur_cfg=$(get_cfg_file)
 
-    # 1. Evaluate DISABLE_WP_CRON state truthfully
     if [[ -n "$cur_cfg" ]] && grep -qiE "define\s*\(\s*['\"]DISABLE_WP_CRON['\"]\s*,\s*true\s*\)" "$cur_cfg" 2>/dev/null; then
         echo -e "   ${GREEN}● Web-spawning suppressed: (DISABLE_WP_CRON = true)${NC}"
         echo -e "   ${GREEN}✅ Background scheduler is correctly offloaded to Linux Crontab.${NC}"
@@ -365,7 +399,6 @@ inspect_and_test_cron() {
         echo -e "   ${GRAY}○ Web-spawning enabled: (DISABLE_WP_CRON is false/unset)${NC}"
     fi
 
-    # 2. Test actual network loopback without triggering WP-CLI false alarms
     local http_code
     http_code=$(curl -s -k -o /dev/null -w "%{http_code}" "https://${SELECTED_DOMAIN}/wp-cron.php" 2>/dev/null || echo "000")
     if [[ "$http_code" == "200" || "$http_code" == "301" ]]; then
@@ -374,7 +407,6 @@ inspect_and_test_cron() {
         echo -e "   ${YELLOW}⚠️  Loopback returned HTTP ${http_code} (Verify /etc/hosts loopback).${NC}"
     fi
 
-    enforce_permissions
     echo ""
     read -rp "Press Enter to return to site dashboard..."
 }
@@ -390,14 +422,12 @@ draw_site_dashboard() {
     local cron_status="${GRAY}○ Web-Triggered${NC}"
     local p_active="0"
 
-    # Fast version read in < 1ms
     local ver_file="$WP_PATH/wp-includes/version.php"
     if [ -f "$ver_file" ]; then
         wp_version=$(awk -F"'" '/\$wp_version\s*=/ {print $2}' "$ver_file" 2>/dev/null || true)
     fi
     [ -z "$wp_version" ] && wp_version="Unknown"
 
-    # Fast maintenance check in < 0.1ms
     if [ -f "$WP_PATH/.maintenance" ]; then
         maint_status="${YELLOW}● MAINTENANCE${NC}"
     fi
@@ -414,7 +444,6 @@ draw_site_dashboard() {
         cron_status="${GREEN}● Linux Crontab (5m)${NC}"
     fi
 
-    # Fast plugin count with --skip-plugins
     p_active=$(wp_run plugin list --status=active --format=count --skip-plugins 2>/dev/null || echo "0")
     p_active=$(echo "$p_active" | tr -dc '0-9')
     [[ -z "$p_active" ]] && p_active="0"
@@ -439,7 +468,7 @@ draw_site_dashboard() {
     echo -ne "${COL_MID}${GRAY}│${NC} "
     printf "%-16s: %-28b\n" "WP-Cron Runner" "$cron_status"
 
-    printf "      %-22s: ${CYAN}%-18s${NC}" "Tenant User" "$vhost_user"
+    printf "      %-22s: ${CYAN}%-18s${NC}" "Tenant User" "${vhost_user:-Unverified}"
     echo -ne "${COL_MID}${GRAY}│${NC} "
     printf "%-16s: ${WHITE}%-20s${NC}\n" "Target Directory" "/var/www/$SELECTED_DOMAIN"
 
@@ -485,7 +514,6 @@ while true; do
             echo -e "\n${BLUE}Purging object caches and transients...${NC}"
             wp_run cache flush 2>/dev/null || true
             wp_run transient delete --all 2>/dev/null || true
-            enforce_permissions
             echo -e "${GREEN}✅ All application caches flushed successfully.${NC}"
             sleep 1.2
             ;;
@@ -496,10 +524,14 @@ while true; do
                 wp_run option delete core_updater.lock >/dev/null 2>&1 || true
                 echo -e "${GREEN}✅ Maintenance mode deactivated & update locks cleared. Site is LIVE.${NC}"
             else
-                printf "<?php \$upgrading = time(); ?>\n" > "$WP_PATH/.maintenance"
-                echo -e "${YELLOW}⚠️  Persistent maintenance mode activated (No 10m timeout). Site is OFFLINE.${NC}"
+                # Static timestamp 1 year into the future prevents 10-minute auto-expiry (Resolves W2)
+                future_ts=$(( $(date +%s) + 31536000 ))
+                v_u=$(get_vhost_user)
+                printf '<?php $upgrading = %s; ?>\n' "$future_ts" > "$WP_PATH/.maintenance"
+                [[ -n "$v_u" ]] && chown "$v_u:$v_u" "$WP_PATH/.maintenance" 2>/dev/null || true
+                chmod 644 "$WP_PATH/.maintenance" 2>/dev/null || true
+                echo -e "${YELLOW}⚠️  Persistent maintenance mode activated. Site is OFFLINE to visitors.${NC}"
             fi
-            enforce_permissions
             sleep 1.5
             ;;
         3)
@@ -512,7 +544,8 @@ while true; do
                 read -rsp "  Enter New Password: " wp_p
                 echo ""
                 if [[ -n "$wp_u" && -n "$wp_p" ]]; then
-                    wp_run user update "$wp_u" --user_pass="$wp_p"
+                    # Pipe password via stdin to avoid /proc argv exposure (Resolves W7)
+                    printf "%s\n" "$wp_p" | wp_run user update "$wp_u" --prompt=user_pass >/dev/null
                     echo -e "${GREEN}✅ Password updated for user '$wp_u'.${NC}"
                 else
                     echo -e "${RED}User and password cannot be empty.${NC}"
@@ -523,13 +556,12 @@ while true; do
                 read -rsp "  New Admin Password: " new_p
                 echo ""
                 if [[ -n "$new_u" && -n "$new_e" && -n "$new_p" ]]; then
-                    wp_run user create "$new_u" "$new_e" --role=administrator --user_pass="$new_p"
+                    printf "%s\n" "$new_p" | wp_run user create "$new_u" "$new_e" --role=administrator --prompt=user_pass >/dev/null
                     echo -e "${GREEN}✅ Administrator '$new_u' provisioned.${NC}"
                 else
                     echo -e "${RED}All fields are required.${NC}"
                 fi
             fi
-            enforce_permissions
             sleep 2
             ;;
         4)
@@ -546,14 +578,13 @@ while true; do
             wp_run plugin update --all || true
             wp_run theme update --all || true
             enforce_permissions
-            echo -e "${GREEN}✅ Updates complete and file permissions re-aligned to tenant user.${NC}"
+            echo -e "${GREEN}✅ Updates complete and file permissions verified.${NC}"
             sleep 1.5
             ;;
         6)
             echo -e "\n${YELLOW}Emergency: Deactivating ALL active plugins (Bypassing Fatal Errors)...${NC}"
             if wp_run plugin deactivate --all --skip-plugins; then
                 wp_run cache flush 2>/dev/null || true
-                enforce_permissions
                 echo -e "${GREEN}✅ All plugins successfully deactivated without loading broken code.${NC}"
             else
                 echo -e "${RED}❌ Failed to deactivate plugins.${NC}"
@@ -564,17 +595,17 @@ while true; do
             cfg_file=$(get_cfg_file)
             if [[ -n "$cfg_file" && -f "$cfg_file" ]]; then
                 if grep -qiE "define\s*\(\s*['\"]WP_DEBUG['\"]\s*,\s*true\s*\)" "$cfg_file"; then
-                    wp_run config set WP_DEBUG false --raw 2>/dev/null || sed -i "s/define(\s*['\"]WP_DEBUG['\"]\s*,\s*true\s*);/define( 'WP_DEBUG', false );/gI" "$cfg_file"
-                    wp_run config set WP_DEBUG_LOG false --raw 2>/dev/null || true
-                    wp_run config set WP_DEBUG_DISPLAY false --raw 2>/dev/null || true
+                    wp_run config set WP_DEBUG false --raw --skip-plugins --skip-themes 2>/dev/null || sed -i "s/define(\s*['\"]WP_DEBUG['\"]\s*,\s*true\s*);/define( 'WP_DEBUG', false );/gI" "$cfg_file"
+                    wp_run config set WP_DEBUG_LOG false --raw --skip-plugins --skip-themes 2>/dev/null || true
+                    wp_run config set WP_DEBUG_DISPLAY false --raw --skip-plugins --skip-themes 2>/dev/null || true
                     echo -e "${YELLOW}WP_DEBUG toggled OFF.${NC}"
                 else
-                    wp_run config set WP_DEBUG true --raw 2>/dev/null || sed -i "s/define(\s*['\"]WP_DEBUG['\"]\s*,\s*false\s*);/define( 'WP_DEBUG', true );/gI" "$cfg_file"
-                    wp_run config set WP_DEBUG_LOG true --raw 2>/dev/null || true
-                    wp_run config set WP_DEBUG_DISPLAY false --raw 2>/dev/null || true
+                    wp_run config set WP_DEBUG true --raw --skip-plugins --skip-themes 2>/dev/null || sed -i "s/define(\s*['\"]WP_DEBUG['\"]\s*,\s*false\s*);/define( 'WP_DEBUG', true );/gI" "$cfg_file"
+                    wp_run config set WP_DEBUG_LOG true --raw --skip-plugins --skip-themes 2>/dev/null || true
+                    wp_run config set WP_DEBUG_DISPLAY false --raw --skip-plugins --skip-themes 2>/dev/null || true
                     echo -e "${GREEN}WP_DEBUG toggled ON (Hardened: Logging to debug.log, Public Display Blocked).${NC}"
                 fi
-                enforce_permissions
+                chmod 600 "$cfg_file" 2>/dev/null || true
             else
                 echo -e "${RED}Error: wp-config.php file not found.${NC}"
             fi
@@ -586,9 +617,19 @@ while true; do
             chmod 700 "$backup_dir"
 
             bkp_file="${backup_dir}/${SELECTED_DOMAIN}_$(date +%Y%m%d_%H%M%S).sql.gz"
-            echo -e "\n${BLUE}Exporting and compressing MySQL database (Gzip)...${NC}"
+            echo -e "\n${BLUE}Exporting and compressing MySQL database (Non-Locking Gzip)...${NC}"
 
-            if wp_run db export - --add-drop-table 2>/dev/null | gzip -c > "$bkp_file"; then
+            sf_path=$(get_authoritative_state_file)
+            site_db=""
+            [[ -n "$sf_path" ]] && site_db=$(grep -E "^DB_NAME=" "$sf_path" 2>/dev/null | cut -d'=' -f2- || true)
+            if [[ -z "$site_db" ]]; then
+                site_db=$(wp_run config get DB_NAME --skip-plugins --skip-themes 2>/dev/null || true)
+            fi
+
+            DUMP_BIN="mariadb-dump"
+            command -v mariadb-dump >/dev/null 2>&1 || DUMP_BIN="mysqldump"
+
+            if [[ "$site_db" =~ ^[a-zA-Z0-9_]{1,64}$ ]] && $DUMP_BIN --single-transaction --quick --routines --triggers -u root "$site_db" 2>/dev/null | gzip -c > "$bkp_file"; then
                 if [ -f "$bkp_file" ] && [ "$(stat -c '%s' "$bkp_file" 2>/dev/null || echo 0)" -gt 64 ]; then
                     chmod 600 "$bkp_file"
                     bkp_size=$(du -h "$bkp_file" | cut -f1)

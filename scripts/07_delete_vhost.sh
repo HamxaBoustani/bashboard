@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [07] Virtual Host & Tenant Purge Engine (TUI Edition)
-# Version:          1.8.0 (Zero-Defect Enterprise: Manifest-Driven DB Discovery,
-#                   Orphaned Certbot Reference Sanitizer, Process-Lock Termination)
+# Version:          1.8.0 (Zero-Trust Enterprise: Root-Owned /etc/bashboard/sites
+#                   State Lookup, Exact Cert Globbing C6 Fix, Process-Lock Purge)
 # Architecture:     Interactive TUI Configurator | Destructive Safety Guardrails
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -43,7 +43,7 @@ if [ -d "/etc/nginx/sites-available" ]; then
     for conf in /etc/nginx/sites-available/*; do
         if [ -f "$conf" ]; then
             b=$(basename "$conf")
-            if [[ "$b" != "default" && "$b" != *"default"* ]]; then
+            if [[ "$b" != "default" && "$b" != *"default"* && "$b" != "phpmyadmin" ]]; then
                 discovered_sites+=("$b")
             fi
         fi
@@ -101,7 +101,7 @@ while true; do
 done
 
 # ------------------------------------------------------------------------------
-# 3. SAFETY CONFIRMATION GATE & SECURE STATE MANIFEST EXTRACTION (C4 Guard)
+# 3. SAFETY CONFIRMATION GATE & SECURE STATE MANIFEST EXTRACTION (Resolves C1)
 # ------------------------------------------------------------------------------
 clear
 echo -e "${RED}==================================================================${NC}"
@@ -118,27 +118,30 @@ echo -e "   7. Temporary session sandbox (/var/www/$TARGET_SITE/tmp)."
 echo -e "   8. All web payloads and logs in: ${YELLOW}/var/www/$TARGET_SITE${NC}"
 echo -e "${RED}------------------------------------------------------------------${NC}"
 
-STATE_FILE="/var/www/$TARGET_SITE/.bashboard-state"
+# Prefer root-isolated state file in /etc/bashboard/sites/ first; fallback to root-owned .bashboard-state
+STATE_FILE="/etc/bashboard/sites/${TARGET_SITE}.state"
+if [ ! -f "$STATE_FILE" ] && [ -f "/var/www/$TARGET_SITE/.bashboard-state" ]; then
+    # Verify file is strictly root-owned and not a symlink before trusting (Resolves C1)
+    if [ ! -L "/var/www/$TARGET_SITE/.bashboard-state" ] && [ "$(stat -c '%u' "/var/www/$TARGET_SITE/.bashboard-state" 2>/dev/null)" = "0" ]; then
+        STATE_FILE="/var/www/$TARGET_SITE/.bashboard-state"
+    fi
+fi
+
 DISCOVERED_DB=""
 DISCOVERED_USER=""
+DISCOVERED_POOL=""
 
-# Tier 1 Extraction: Truthful root-owned state manifest created at provisioning
 if [ -f "$STATE_FILE" ]; then
     DISCOVERED_DB=$(grep -E "^DB_NAME=" "$STATE_FILE" 2>/dev/null | cut -d'=' -f2- || true)
     DISCOVERED_USER=$(grep -E "^DB_USER=" "$STATE_FILE" 2>/dev/null | cut -d'=' -f2- || true)
-fi
-
-# Tier 2 Fallback: WP-CLI AST extraction if state file was missing
-if [ -z "$DISCOVERED_DB" ] && [ -f "/var/www/$TARGET_SITE/public_html/wp-config.php" ] && command -v wp >/dev/null 2>&1; then
-    DISCOVERED_DB=$(wp config get DB_NAME --path="/var/www/$TARGET_SITE/public_html" --allow-root --skip-plugins --skip-themes 2>/dev/null || true)
-    DISCOVERED_USER=$(wp config get DB_USER --path="/var/www/$TARGET_SITE/public_html" --allow-root --skip-plugins --skip-themes 2>/dev/null || true)
+    DISCOVERED_POOL=$(grep -E "^POOL_NAME=" "$STATE_FILE" 2>/dev/null | cut -d'=' -f2- || true)
 fi
 
 CALC_DB="${DISCOVERED_DB:-}"
 CALC_USER="${DISCOVERED_USER:-}"
 
 DROP_DB=0
-DENIED_SYSTEM_DBS="mysql|information_schema|performance_schema|sys"
+DENIED_SYSTEM_DBS="mysql|information_schema|performance_schema|sys|phpmyadmin"
 
 if [[ "$CALC_DB" =~ ^[a-zA-Z0-9_]{1,64}$ ]] && ! echo "$CALC_DB" | grep -qiE "^($DENIED_SYSTEM_DBS)$"; then
     echo -e "   Associated Database Verified: \`${YELLOW}$CALC_DB\` (User: \`$CALC_USER\`)${NC}"
@@ -166,7 +169,7 @@ echo -e "${RED}=================================================================
 echo -e "   🗑️  ${BOLD}${WHITE}Purging Virtual Host:${NC} ${YELLOW}$TARGET_SITE${NC}"
 echo -e "${RED}==================================================================${NC}\n"
 
-# 4.1 Dismantle Nginx Configurations, SSL and Dedicated Logrotate
+# 4.1 Dismantle Nginx Configurations, SSL and Dedicated Logrotate (Resolves C6)
 echo -e "   [1/8] Dismantling Nginx virtual host, SSL and Logrotate drop-ins..."
 rm -f "/etc/nginx/sites-enabled/$TARGET_SITE"
 rm -f "/etc/nginx/sites-available/$TARGET_SITE"
@@ -175,7 +178,6 @@ rm -f "/etc/logrotate.d/vhost-$TARGET_SITE"
 
 # Sanitize /etc/nginx/sites-available/default if Certbot previously mutated it with this domain
 if [ -f "/etc/nginx/sites-available/default" ] && grep -qF "$TARGET_SITE" "/etc/nginx/sites-available/default" 2>/dev/null; then
-    echo -e "         Sanitizing Certbot mutations from stock default vhost..."
     rm -f "/etc/nginx/sites-enabled/default"
     cat > "/etc/nginx/sites-available/default" <<'EOF'
 server {
@@ -195,7 +197,8 @@ if command -v certbot >/dev/null 2>&1 && [ -d "/etc/letsencrypt/live/$TARGET_SIT
     echo -e "         Purging ACME Let's Encrypt certificates..."
     certbot delete --cert-name "$TARGET_SITE" --non-interactive >/dev/null 2>&1 || true
 fi
-rm -rf "/etc/letsencrypt/live/${TARGET_SITE}"* "/etc/letsencrypt/archive/${TARGET_SITE}"* "/etc/letsencrypt/renewal/${TARGET_SITE}"*.conf 2>/dev/null || true
+# Exact path match only: prevents over-matching neighboring TLDs like example.com.au (Resolves C6)
+rm -rf "/etc/letsencrypt/live/${TARGET_SITE}" "/etc/letsencrypt/archive/${TARGET_SITE}" "/etc/letsencrypt/renewal/${TARGET_SITE}.conf" 2>/dev/null || true
 
 if nginx -t >/dev/null 2>&1; then
     systemctl reload nginx
@@ -204,14 +207,17 @@ fi
 
 # 4.2 Purge Dedicated PHP-FPM Pools across ALL PHP Versions
 echo -e "\n   [2/8] Purging dedicated PHP-FPM resource pools..."
-pool_name=$(echo "$TARGET_SITE" | tr '.-' '_' | cut -c 1-32)
+clean_slug=$(echo "$TARGET_SITE" | tr '.-' '_')
+d_hash=$(echo -n "$TARGET_SITE" | md5sum | cut -c1-4)
+legacy_pool=$(echo "$TARGET_SITE" | tr '.-' '_' | cut -c 1-32)
+hashed_pool="${DISCOVERED_POOL:-${clean_slug:0:22}_${d_hash}}"
 
-rm -f /etc/php/*/fpm/pool.d/"${pool_name}.conf"
-rm -f /run/php/php*-fpm-"${pool_name}.sock"
+rm -f /etc/php/*/fpm/pool.d/"${hashed_pool}.conf" /etc/php/*/fpm/pool.d/"${legacy_pool}.conf"
+rm -f /run/php/php*-fpm-"${hashed_pool}.sock" /run/php/php*-fpm-"${legacy_pool}.sock"
 
 for fpm_svc in $(systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1}' | grep -iE '^php[0-9.]*-fpm\.service$'); do
     if systemctl is-active --quiet "$fpm_svc" 2>/dev/null; then
-        systemctl restart "$fpm_svc" 2>/dev/null || true
+        systemctl reload "$fpm_svc" 2>/dev/null || systemctl restart "$fpm_svc" 2>/dev/null || true
     fi
 done
 echo -e "   ${GREEN}✅ PHP-FPM pools unlinked and daemons cleanly reloaded.${NC}"
@@ -241,12 +247,13 @@ rebalance_remaining_pools() {
     shopt -u nullglob
 
     for p in "${pools[@]}"; do
-        if [[ "$(basename "$p")" != "www.conf" ]]; then
+        local bname
+        bname=$(basename "$p")
+        if [[ "$bname" != "www.conf" && "$bname" != "phpmyadmin.conf" ]]; then
             sed -i -E "s/^(pm\.max_children\s*=\s*)[0-9]+/\1${safe_children}/" "$p" 2>/dev/null || true
         fi
     done
 
-    # Syntax test gate: Verify remaining pool configs before reload
     for fpm_bin in /usr/sbin/php-fpm*; do
         if [ -x "$fpm_bin" ]; then
             if ! "$fpm_bin" -t >/dev/null 2>&1; then
@@ -272,18 +279,17 @@ if [ -f "$STATE_FILE" ]; then
     actual_vuser=$(grep -E "^TENANT_USER=" "$STATE_FILE" 2>/dev/null | cut -d'=' -f2- || true)
 fi
 if [ -z "$actual_vuser" ]; then
-    actual_vuser=$(stat -c '%U' "/var/www/$TARGET_SITE/public_html" 2>/dev/null || stat -c '%U' "/var/www/$TARGET_SITE" 2>/dev/null || true)
+    actual_vuser=$(stat -c '%U' "/var/www/$TARGET_SITE/public_html" 2>/dev/null || true)
 fi
 
-# Strictly verify tenant prefix ^v_ and EXACT home directory match to avoid killing real system users
-if [[ "$actual_vuser" =~ ^v_ ]] && [ "$actual_vuser" != "root" ] && [ "$actual_vuser" != "www-data" ] && [ "$actual_vuser" != "ubuntu" ]; then
+if [[ "$actual_vuser" =~ ^v_[a-z0-9_]+$ ]] && [ "$actual_vuser" != "v_pma_sys" ]; then
     user_home=$(getent passwd "$actual_vuser" 2>/dev/null | cut -d: -f6 || true)
     if [[ "$user_home" == "/var/www/$TARGET_SITE" ]]; then
-        # Terminate active cron jobs or worker processes to eliminate 'user is currently used by process' errors
         pkill -u "$actual_vuser" -15 2>/dev/null || true
         sleep 0.5
         pkill -u "$actual_vuser" -9 2>/dev/null || true
 
+        gpasswd -d www-data "$actual_vuser" >/dev/null 2>&1 || true
         if id -u "$actual_vuser" >/dev/null 2>&1; then
             userdel -f "$actual_vuser" 2>/dev/null || true
         fi
@@ -309,34 +315,34 @@ echo -e "\n   [5/8] Sanitizing local DNS resolution table..."
 sed -i "/[[:space:]]${TARGET_SITE}\([[:space:]]\|$\)/d" /etc/hosts 2>/dev/null || true
 echo -e "   ${GREEN}✅ Loopback entries purged from /etc/hosts.${NC}"
 
-# 4.6 C4 Hardening: Drop Database & User with Denylist & Identifier Validation
+# 4.6 Drop Database & User (Using MYSQL_PWD to avoid /proc argv leak - Resolves W7)
 if [ "$DROP_DB" -eq 1 ] && [[ "$CALC_DB" =~ ^[a-zA-Z0-9_]{1,64}$ ]] && ! echo "$CALC_DB" | grep -qiE "^($DENIED_SYSTEM_DBS)$"; then
     echo -e "\n   [6/8] Dropping MariaDB database and isolated credentials..."
     DB_BIN="mariadb"
     command -v mariadb >/dev/null 2>&1 || DB_BIN="mysql"
 
-    MYSQL_PASS_ARG=""
+    mysql_pwd_input=""
     if ! $DB_BIN -u root -e "SELECT 1;" >/dev/null 2>&1; then
         read -rsp "   Enter MariaDB root password to drop database: " mysql_pwd_input
         echo ""
-        [ -n "$mysql_pwd_input" ] && MYSQL_PASS_ARG="-p${mysql_pwd_input}"
     fi
 
-    $DB_BIN -u root $MYSQL_PASS_ARG -e "DROP DATABASE IF EXISTS \`$CALC_DB\`;" 2>/dev/null || true
+    MYSQL_PWD="$mysql_pwd_input" $DB_BIN -u root -e "DROP DATABASE IF EXISTS \`$CALC_DB\`;" 2>/dev/null || true
 
-    DENIED_SYSTEM_USERS="root|mysql|debian-sys-maint|www-data"
+    DENIED_SYSTEM_USERS="root|mysql|mariadb.sys|debian-sys-maint|www-data|phpmyadmin"
     if [[ "$CALC_USER" =~ ^[a-zA-Z0-9_]{1,32}$ ]] && ! echo "$CALC_USER" | grep -qiE "^($DENIED_SYSTEM_USERS)$"; then
-        $DB_BIN -u root $MYSQL_PASS_ARG -e "DROP USER IF EXISTS '$CALC_USER'@'localhost'; FLUSH PRIVILEGES;" 2>/dev/null || true
+        MYSQL_PWD="$mysql_pwd_input" $DB_BIN -u root -e "DROP USER IF EXISTS '$CALC_USER'@'localhost'; FLUSH PRIVILEGES;" 2>/dev/null || true
     fi
     echo -e "   ${GREEN}✅ Database \`$CALC_DB\` and user \`$CALC_USER\` safely dropped.${NC}"
 else
     echo -e "\n   [6/8] Database retained per operator choice or safety validation."
 fi
 
-# 4.7 Eradicate Filesystem Payload & Temporary Sandbox
-echo -e "\n   [7/8] Eradicating web files, temp session sandbox, and logs..."
+# 4.7 Eradicate Filesystem Payload, State Manifest & Temporary Sandbox
+echo -e "\n   [7/8] Eradicating web files, state manifest, temp sandbox, and logs..."
+rm -f "/etc/bashboard/sites/${TARGET_SITE}.state"
 rm -rf "/var/www/$TARGET_SITE"
-echo -e "   ${GREEN}✅ Directory /var/www/$TARGET_SITE completely eradicated.${NC}"
+echo -e "   ${GREEN}✅ Directory /var/www/$TARGET_SITE and state manifest completely eradicated.${NC}"
 
 # 4.8 Post-Purge SRE Health Check
 echo -e "\n   [8/8] Executing final post-purge stack health check..."

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [02] Nginx Virtual Host & Architecture Deployer (TUI Edition)
-# Version:          1.8.0 (CIS & OWASP Hardened: Kernel Interface IP Discovery,
-#                   Graceful Subdomain SSL Degradation, Zero-Mutation Webroot ACME)
+# Version:          1.8.0 (Zero-Trust Hardened: Root-Anchored Tenant Dir, CVE-2016-1247
+#                   Log Symlink Guard, Hashed DB/Pool Names, Webroot ACME TLS)
 # Architecture:     Interactive TUI Configurator | Commercial Hosting Standard
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -79,12 +79,12 @@ detect_installed_phps() {
     if [ ${#phps[@]} -gt 0 ]; then
         printf "%s\n" "${phps[@]}" | sort -uV | paste -sd "," -
     else
-        echo "php"
+        echo ""
     fi
 }
 
 AVAILABLE_PHPS=$(detect_installed_phps)
-DEFAULT_PHP=$(echo "$AVAILABLE_PHPS" | awk -F',' '{print $NF}' | xargs)
+DEFAULT_PHP=$(echo "$AVAILABLE_PHPS" | awk -F',' '{print $NF}' | tr -d '[:space:]')
 [[ -z "$DEFAULT_PHP" ]] && DEFAULT_PHP="8.3"
 
 # ------------------------------------------------------------------------------
@@ -97,14 +97,14 @@ ENABLE_MEDIA_SUBDOMAIN=0 # 1: Yes (uploads.domain), 0: No
 ENABLE_LETSENCRYPT=1     # 1: Pre-flight DNS & Certbot, 0: Self-signed only
 DB_NAME=""
 DB_USER=""
-DB_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
+DB_PASS=$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c 16)
 MYSQL_ADMIN="root"
 MYSQL_ADMIN_PASS=""
 
 validate_domain() {
     local d="$1"
     [[ -z "$d" ]] && return 1
-    local regex="^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+    local regex="^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$"
     [[ "$d" =~ $regex && "${#d}" -le 253 ]]
 }
 
@@ -162,7 +162,9 @@ rebalance_all_pools() {
     shopt -u nullglob
 
     for p in "${pools[@]}"; do
-        if [[ "$(basename "$p")" != "www.conf" ]]; then
+        local bname
+        bname=$(basename "$p")
+        if [[ "$bname" != "www.conf" && "$bname" != "phpmyadmin.conf" ]]; then
             sed -i -E "s/^(pm\.max_children\s*=\s*)[0-9]+/\1${target_workers}/" "$p" 2>/dev/null || true
         fi
     done
@@ -181,6 +183,15 @@ rebalance_all_pools() {
             systemctl reload "$fpm" 2>/dev/null || true
         fi
     done
+}
+
+# Executes MariaDB queries securely without exposing admin password in /proc argv
+run_mysql_admin() {
+    if [ -n "$MYSQL_ADMIN_PASS" ]; then
+        MYSQL_PWD="$MYSQL_ADMIN_PASS" "$DB_BIN" -u "$MYSQL_ADMIN" "$@"
+    else
+        "$DB_BIN" -u "$MYSQL_ADMIN" "$@"
+    fi
 }
 
 # ------------------------------------------------------------------------------
@@ -243,11 +254,14 @@ while true; do
             echo ""
             while true; do
                 read -rp "   Enter Target Domain (e.g., mysite.local, example.com): " raw_d
-                raw_d=$(echo "$raw_d" | tr '[:upper:]' '[:lower:]' | xargs)
+                raw_d=$(echo "$raw_d" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
                 if validate_domain "$raw_d"; then
                     DOMAIN="$raw_d"
-                    DB_NAME=$(echo "$DOMAIN" | tr '.-' '_' | cut -c 1-32)
-                    DB_USER="${DB_NAME:0:14}_u"
+                    clean_slug=$(echo "$DOMAIN" | tr '.-' '_')
+                    d_hash=$(echo -n "$DOMAIN" | md5sum | cut -c1-4)
+                    # Collision-resistant hashed identifiers (Resolves C5)
+                    DB_NAME="${clean_slug:0:20}_${d_hash}"
+                    DB_USER="u_${clean_slug:0:8}_${d_hash}"
                     break
                 else
                     echo -e "   ${RED}Invalid domain syntax. Use standard FQDN without protocols.${NC}"
@@ -256,13 +270,13 @@ while true; do
             ;;
         2)
             echo -e "\n   ${CYAN}Detected Active PHP Engines:${NC} ${AVAILABLE_PHPS:-None}"
-            read -rp "   Enter Target PHP Version (e.g. 7.4, 8.1, 8.2, 8.3, 8.4): " raw_php
+            read -rp "   Enter Target PHP Version (e.g. 7.4, 8.1, 8.2, 8.3, 8.4, 8.5): " raw_php
             raw_php=$(echo "$raw_php" | tr -d '[:space:]')
-            if [[ "$raw_php" =~ ^[789]\.[0-9]+$ ]]; then
+            if [[ "$raw_php" =~ ^[789]\.[0-9]+$ ]] && [ -x "/usr/sbin/php-fpm${raw_php}" ]; then
                 PHP_VER="$raw_php"
             else
-                echo -e "   ${RED}Invalid format (expected X.Y). Keeping $PHP_VER${NC}"
-                sleep 1.2
+                echo -e "   ${RED}PHP ${raw_php} FPM binary (/usr/sbin/php-fpm${raw_php}) is not installed! Keeping $PHP_VER.${NC}"
+                sleep 1.8
             fi
             ;;
         3)
@@ -294,6 +308,11 @@ while true; do
                 sleep 1.8
                 continue
             fi
+            if [ ! -x "/usr/sbin/php-fpm${PHP_VER}" ]; then
+                echo -e "\n   ${RED}Error: PHP-FPM v${PHP_VER} is not installed! Provision it in Option [1] first.${NC}"
+                sleep 2
+                continue
+            fi
             break
             ;;
         0)
@@ -308,28 +327,43 @@ while true; do
 done
 
 # ------------------------------------------------------------------------------
-# 7. SRE ATOMIC ROLLBACK TRAP & C5 PRE-FLIGHT GUARDS
+# 7. SRE ATOMIC ROLLBACK TRAP & C5 PRE-FLIGHT COLLISION GUARDS
 # ------------------------------------------------------------------------------
-if [ -d "/var/www/$DOMAIN" ] || [ -f "/etc/nginx/sites-available/$DOMAIN" ] || [ -f "/etc/nginx/sites-enabled/$DOMAIN" ]; then
-    echo -e "\n   ${RED}❌ [FATAL] Virtual Host '$DOMAIN' already exists on this server!${NC}" >&2
+clean_slug=$(echo "$DOMAIN" | tr '.-' '_')
+domain_hash=$(echo -n "$DOMAIN" | md5sum | cut -c1-4)
+pool_name="${clean_slug:0:22}_${domain_hash}"
+vhost_user="v_${clean_slug:0:10}_${domain_hash}"
+dedicated_sock="/run/php/php${PHP_VER}-fpm-${pool_name}.sock"
+
+if [ -d "/var/www/$DOMAIN" ] || [ -f "/etc/nginx/sites-available/$DOMAIN" ] || [ -f "/etc/nginx/sites-enabled/$DOMAIN" ] || [ -f "/etc/php/${PHP_VER}/fpm/pool.d/${pool_name}.conf" ]; then
+    echo -e "\n   ${RED}❌ [FATAL] Virtual Host or FPM Pool for '$DOMAIN' already exists on this server!${NC}" >&2
     echo -e "   ${YELLOW}Aborting to prevent destructive overwrite or accidental rollback.${NC}" >&2
     exit 1
 fi
 
-PROVISIONING_STARTED=0
-pool_name=$(echo "$DOMAIN" | tr '.-' '_' | cut -c 1-32)
-domain_hash=$(echo -n "$DOMAIN" | md5sum | cut -c1-4)
-vhost_user="v_${pool_name:0:10}_${domain_hash}"
-
+# Authenticate DB & check pre-existence BEFORE starting provisioning (Resolves C5)
 DB_PREEXISTED=0
 if [ "$PAYLOAD_TYPE" == "wordpress" ]; then
-    set +e
-    check_db_out=$($DB_BIN -u "$MYSQL_ADMIN" ${MYSQL_ADMIN_PASS:+-p"$MYSQL_ADMIN_PASS"} -Nse "SHOW DATABASES LIKE '$DB_NAME';" 2>/dev/null)
-    set -e
-    if echo "$check_db_out" | grep -qx "$DB_NAME"; then
-        DB_PREEXISTED=1
+    if ! run_mysql_admin -e "SELECT 1;" >/dev/null 2>&1; then
+        echo -e "\n   ${YELLOW}⚠️  Database authentication requires credentials.${NC}"
+        read -rsp "   Enter MySQL/MariaDB password for '$MYSQL_ADMIN': " MYSQL_ADMIN_PASS
+        echo ""
+        if ! run_mysql_admin -e "SELECT 1;" >/dev/null 2>&1; then
+            echo -e "   ${RED}❌ [FATAL] MariaDB authentication failed! Aborting.${NC}" >&2
+            exit 1
+        fi
+    fi
+
+    check_db_out=$(run_mysql_admin -Nse "SHOW DATABASES LIKE '$DB_NAME';" 2>/dev/null || true)
+    check_user_out=$(run_mysql_admin -Nse "SELECT User FROM mysql.user WHERE User='$DB_USER' AND Host='localhost';" 2>/dev/null || true)
+    if [[ -n "$check_db_out" || -n "$check_user_out" ]]; then
+        echo -e "\n   ${RED}❌ [FATAL] Database '$DB_NAME' or DB User '$DB_USER' already exists!${NC}" >&2
+        echo -e "   ${YELLOW}Aborting to prevent cross-tenant database collision.${NC}" >&2
+        exit 1
     fi
 fi
+
+PROVISIONING_STARTED=0
 
 rollback_on_failure() {
     local lineno="$1"
@@ -341,19 +375,19 @@ rollback_on_failure() {
         rm -f "/etc/nginx/sites-enabled/$DOMAIN" "/etc/nginx/sites-available/$DOMAIN"
         rm -f "/etc/nginx/ssl/$DOMAIN.crt" "/etc/nginx/ssl/$DOMAIN.key"
         rm -f "/etc/logrotate.d/vhost-$DOMAIN"
+        rm -f "/etc/bashboard/sites/${DOMAIN}.state"
         sed -i "/[[:space:]]${DOMAIN}\([[:space:]]\|$\)/d" /etc/hosts 2>/dev/null || true
         nginx -t >/dev/null 2>&1 && systemctl reload nginx 2>/dev/null || true
 
-        rm -f "/etc/php/${PHP_VER}/fpm/pool.d/${pool_name}.conf" "/run/php/php${PHP_VER}-fpm-${pool_name}.sock"
-        systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || true
+        rm -f "/etc/php/${PHP_VER}/fpm/pool.d/${pool_name}.conf" "$dedicated_sock"
+        systemctl reload "php${PHP_VER}-fpm" 2>/dev/null || systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || true
 
         if [ "$PAYLOAD_TYPE" == "wordpress" ] && [ -n "${DB_NAME:-}" ] && [ "$DB_PREEXISTED" -eq 0 ]; then
-            local db_pass_arg=""
-            [ -n "$MYSQL_ADMIN_PASS" ] && db_pass_arg="-p$MYSQL_ADMIN_PASS"
-            $DB_BIN -u "$MYSQL_ADMIN" $db_pass_arg -e "DROP DATABASE IF EXISTS \`$DB_NAME\`; DROP USER IF EXISTS '$DB_USER'@'localhost';" 2>/dev/null || true
+            run_mysql_admin -e "DROP DATABASE IF EXISTS \`$DB_NAME\`; DROP USER IF EXISTS '$DB_USER'@'localhost';" 2>/dev/null || true
         fi
 
         rm -rf "/var/www/$DOMAIN"
+        gpasswd -d www-data "$vhost_user" >/dev/null 2>&1 || true
         userdel -f "$vhost_user" 2>/dev/null || true
         groupdel "$vhost_user" 2>/dev/null || true
 
@@ -391,8 +425,12 @@ if ! id -u "$vhost_user" >/dev/null 2>&1; then
     useradd -r -g "$vhost_user" -s /usr/sbin/nologin -d "/var/www/$DOMAIN" -M "$vhost_user"
 fi
 
+# Grant www-data traversal membership into tenant's primary group
+usermod -a -G "$vhost_user" www-data
+
 # 8.2 Prepare Directory Hierarchy, Temp Sandbox & TLS Certificates
-mkdir -p "$project_root" "$logs_dir" "$tmp_dir" "/etc/nginx/ssl"
+mkdir -p "$project_root" "$logs_dir" "$tmp_dir" "/etc/nginx/ssl" "/etc/bashboard/sites"
+chmod 700 "/etc/bashboard" "/etc/bashboard/sites"
 [[ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ]] && mkdir -p "$media_root"
 
 chown -R "$vhost_user:$vhost_user" "$tmp_dir"
@@ -408,17 +446,21 @@ if [[ ! -f "$cert_file" || ! -f "$key_file" ]]; then
     chmod 600 "$key_file"
 fi
 
-# 8.3 Configure PHP-FPM Pool with Strict Sandboxing, Syscall Blocking & Realpath Optimization
+# 8.3 Configure PHP-FPM Pool Safely (Test Before Reload - Resolves W4)
 safe_max_workers=$(calculate_safe_max_children)
 
 configure_isolated_php_pool() {
     local domain="$1"
     local php_ver="$2"
     local pool_conf="/etc/php/${php_ver}/fpm/pool.d/${pool_name}.conf"
-    local dedicated_sock="/run/php/php${php_ver}-fpm-${pool_name}.sock"
 
-    echo -e "   [3/8] Configuring sandboxed PHP-FPM pool: ${CYAN}${pool_name}${NC} (Max Workers: ${GREEN}${safe_max_workers}${NC})..." >&2
+    echo -e "   [3/8] Configuring sandboxed PHP-FPM pool: ${CYAN}${pool_name}${NC} (Max Workers: ${GREEN}${safe_max_workers}${NC})..."
     mkdir -p "/etc/php/${php_ver}/fpm/pool.d" "/run/php"
+
+    # Pre-create PHP log files owned by tenant so logs_dir can remain non-writable by tenant (Resolves C2)
+    touch "${logs_dir}/php_error.log" "${logs_dir}/php_slow.log"
+    chown "$vhost_user:www-data" "${logs_dir}/php_error.log" "${logs_dir}/php_slow.log"
+    chmod 640 "${logs_dir}/php_error.log" "${logs_dir}/php_slow.log"
 
     cat > "$pool_conf" <<EOF
 ; ==============================================================================
@@ -458,8 +500,8 @@ php_admin_value[sys_temp_dir] = ${tmp_dir}
 ; Strict File Access Jail (Eliminating global /tmp/ leakage)
 php_admin_value[open_basedir] = /var/www/${domain}/:/dev/urandom:/usr/share/zoneinfo/
 
-; Syscall & Shell Execution Lockdown (Prevents open_basedir bypass via OS binaries)
-php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,show_source,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid
+; Function Lockdown (Prevents open_basedir bypass via OS shell spawning)
+php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,show_source,highlight_file,proc_get_status,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid
 
 ; Realpath Cache Performance Optimization (Neutralizes open_basedir I/O penalty)
 php_admin_value[realpath_cache_size] = 4096k
@@ -471,31 +513,41 @@ php_value[upload_max_filesize] = 128M
 php_value[post_max_size] = 128M
 EOF
 
+    # Validate FPM syntax strictly BEFORE reloading/starting daemon (Resolves W4)
+    if ! "/usr/sbin/php-fpm${php_ver}" -t >/dev/null 2>&1; then
+        echo -e "   ${RED}❌ [ERROR] PHP-FPM pool syntax validation failed!${NC}" >&2
+        "/usr/sbin/php-fpm${php_ver}" -t >&2 || true
+        return 1
+    fi
+
     if systemctl is-active --quiet "php${php_ver}-fpm" 2>/dev/null; then
-        systemctl restart "php${php_ver}-fpm" 2>/dev/null || systemctl reload "php${php_ver}-fpm" 2>/dev/null || true
+        systemctl reload "php${php_ver}-fpm"
     else
-        systemctl enable --now "php${php_ver}-fpm" 2>/dev/null || systemctl start "php${php_ver}-fpm" 2>/dev/null || true
+        systemctl enable --now "php${php_ver}-fpm"
     fi
 
     local retry=0
-    while [ ! -S "$dedicated_sock" ] && [ "$retry" -lt 10 ]; do
+    while [ ! -S "$dedicated_sock" ] && [ "$retry" -lt 20 ]; do
         sleep 0.1
         retry=$((retry + 1))
     done
 
-    echo "$dedicated_sock"
+    if [ ! -S "$dedicated_sock" ]; then
+        echo -e "   ${RED}❌ [ERROR] Dedicated PHP-FPM socket failed to materialize: $dedicated_sock${NC}" >&2
+        return 1
+    fi
 }
 
-php_socket=$(configure_isolated_php_pool "$DOMAIN" "$PHP_VER")
+configure_isolated_php_pool "$DOMAIN" "$PHP_VER"
+php_socket="$dedicated_sock"
 rebalance_all_pools
 
 # 8.4 Compile Hardened Nginx Virtual Host Configuration (OWASP & CIS Hardened)
 echo -e "   [4/8] Compiling Nginx virtual host configuration..."
 
-# Unlink default stock config if present to prevent server_name collisions
 rm -f /etc/nginx/sites-enabled/default
 
-# 1. Guarantee Global Rate-Limit Zone Exists (Prevents unknown limit_req_zone crash)
+# 1. Guarantee Global Rate-Limit Zone Exists
 if [ ! -f "/etc/nginx/conf.d/00-bashboard-rate-limit.conf" ]; then
     mkdir -p "/etc/nginx/conf.d"
     printf "%s\n" \
@@ -504,7 +556,28 @@ if [ ! -f "/etc/nginx/conf.d/00-bashboard-rate-limit.conf" ]; then
         "limit_req_status 429;" > "/etc/nginx/conf.d/00-bashboard-rate-limit.conf"
 fi
 
-# 2. Guarantee Standard TLS Parameters Snippet Exists
+# 2. Guarantee Catch-All Default Server Block (Prevents Unknown Host Header Leaks - Resolves W5)
+if [ ! -f "/etc/nginx/conf.d/00-bashboard-default-catchall.conf" ]; then
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout /etc/nginx/ssl/catchall.key -out /etc/nginx/ssl/catchall.crt \
+        -subj "/CN=invalid.local" 2>/dev/null
+    chmod 600 /etc/nginx/ssl/catchall.key
+    cat > "/etc/nginx/conf.d/00-bashboard-default-catchall.conf" <<'EOF'
+# Bashboard Catch-All Default Server: Drops spoofed/unknown Host headers (444)
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+    ssl_certificate     /etc/nginx/ssl/catchall.crt;
+    ssl_certificate_key /etc/nginx/ssl/catchall.key;
+    return 444;
+}
+EOF
+fi
+
+# 3. Guarantee Standard TLS Parameters Snippet Exists
 if [ ! -f "/etc/nginx/snippets/ssl-params.conf" ]; then
     mkdir -p "/etc/nginx/snippets"
     cat > "/etc/nginx/snippets/ssl-params.conf" <<'EOF'
@@ -711,6 +784,14 @@ server {
 EOF
 fi
 
+# Pre-create Nginx log files owned by www-data before Nginx reload (Resolves C2)
+touch "$logs_dir/nginx_access.log" "$logs_dir/nginx_error.log"
+if [ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ]; then
+    touch "$logs_dir/uploads_access.log" "$logs_dir/uploads_error.log"
+fi
+chown www-data:"$vhost_user" "$logs_dir"/*_access.log "$logs_dir"/*_error.log
+chmod 640 "$logs_dir"/*_access.log "$logs_dir"/*_error.log
+
 ln -sf "$nginx_conf" "/etc/nginx/sites-enabled/$DOMAIN"
 
 if nginx_test_output=$(nginx -t 2>&1); then
@@ -728,22 +809,9 @@ fi
 if [ "$PAYLOAD_TYPE" == "wordpress" ]; then
     echo -e "\n   [5/8] Initializing Database & Dedicated Credentials..."
 
-    if ! $DB_BIN -u "$MYSQL_ADMIN" -e "SELECT 1;" >/dev/null 2>&1; then
-        if [ -z "$MYSQL_ADMIN_PASS" ]; then
-            echo -e "   ${YELLOW}⚠️  Database authentication requires credentials.${NC}"
-            read -rsp "   Enter MySQL/MariaDB password for '$MYSQL_ADMIN': " MYSQL_ADMIN_PASS
-            echo ""
-        fi
-    fi
-
-    DB_ARGS=("-u" "$MYSQL_ADMIN")
-    if [ -n "$MYSQL_ADMIN_PASS" ]; then
-        DB_ARGS+=("-p${MYSQL_ADMIN_PASS}")
-    fi
-
-    $DB_BIN "${DB_ARGS[@]}" <<EOSQL
-CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
+    run_mysql_admin <<EOSQL
+CREATE DATABASE \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
 GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';
 FLUSH PRIVILEGES;
 EOSQL
@@ -758,12 +826,10 @@ setup_url="https://$DOMAIN/"
 if [ "$PAYLOAD_TYPE" == "wordpress" ]; then
     echo -e "\n   [6/8] Staging WordPress Core & Generating Direct Filesystem Config..."
 
-    # Stage inside isolated tenant tmp_dir instead of world-writable /tmp
     rm -rf "$tmp_dir/wp-latest.zip" "$tmp_dir/wordpress"
     wget -qO "$tmp_dir/wp-latest.zip" https://wordpress.org/latest.zip
     unzip -q -o "$tmp_dir/wp-latest.zip" -d "$tmp_dir/"
 
-    # Seamless cross-filesystem merge: Preserves target directory structures
     cp -a "$tmp_dir/wordpress/." "$project_root/"
     rm -rf "$tmp_dir/wp-latest.zip" "$tmp_dir/wordpress"
     mkdir -p "$media_root"
@@ -816,12 +882,14 @@ EOF
 fi
 
 # ------------------------------------------------------------------------------
-# 11. COMMERCIAL-GRADE POSIX ACLS & DEDICATED LOGROTATE DEPLOYMENT
+# 11. ZERO-TRUST POSIX ISOLATION & SYMLINK-SAFE LOGROTATE (Resolves C1 & C2)
 # ------------------------------------------------------------------------------
-echo -e "   [7/8] Applying POSIX isolation & Tenant-Dedicated Logrotate..."
+echo -e "   [7/8] Applying Root-Anchored POSIX isolation & Symlink-Safe Logrotate..."
 
-# 1. Base tenant directory isolated from other tenants: Owner (rwx), Group www-data (r-x), Others (--- NO ACCESS)
-chown "$vhost_user:www-data" "/var/www/$DOMAIN"
+# 1. Root-Anchored Base Directory (root:$vhost_user 750):
+#    - Tenant & www-data (in group $vhost_user) can traverse (r-x), Other = --- (Zero cross-tenant access).
+#    - Because 'root' owns /var/www/$DOMAIN, the tenant CANNOT unlink .bashboard-state or rename logs/!
+chown "root:$vhost_user" "/var/www/$DOMAIN"
 chmod 750 "/var/www/$DOMAIN"
 
 # 2. Web payload owned by tenant: Allows one-click plugin/theme updates directly from WP Dashboard
@@ -829,31 +897,35 @@ chown -R "$vhost_user:$vhost_user" "$project_root"
 find "$project_root" -type d -exec chmod 755 {} +
 find "$project_root" -type f -exec chmod 644 {} +
 
-# 3. wp-config.php restricted to tenant user (600): Absolute isolation against cross-tenant snooping
+# 3. wp-config.php restricted to tenant user (600)
 if [ -f "$project_root/wp-config.php" ]; then
     chown "$vhost_user:$vhost_user" "$project_root/wp-config.php"
     chmod 600 "$project_root/wp-config.php"
 fi
 
-# 4. Logs directory strictly accessible by tenant and webserver
-chown -R "$vhost_user:www-data" "$logs_dir"
-chmod 770 "$logs_dir"
+# 4. Logs directory owned by www-data:$vhost_user (750 - Read-Only for tenant, immune to CVE-2016-1247 symlink attacks)
+chown "www-data:$vhost_user" "$logs_dir"
+chmod 750 "$logs_dir"
 
-# 5. Dedicated Logrotate Drop-in: Uses $vhost_user www-data to eliminate permission deadlocks
+# 5. Dedicated Logrotate Drop-in: Nginx logs rotate as www-data; PHP logs rotate via copytruncate
 cat > "/etc/logrotate.d/vhost-$DOMAIN" <<EOF
 # Bashboard Dedicated Logrotate Policy for $DOMAIN
 $logs_dir/*access.log $logs_dir/*error.log {
-    su $vhost_user www-data
+    su www-data $vhost_user
     daily
     missingok
     rotate 14
     compress
     delaycompress
     notifempty
-    create 0640 $vhost_user www-data
+    create 0640 www-data $vhost_user
     sharedscripts
     postrotate
-        systemctl kill -s USR1 nginx.service 2>/dev/null || [ -s /run/nginx.pid ] && kill -USR1 \$(cat /run/nginx.pid) || true
+        if systemctl is-active --quiet nginx.service 2>/dev/null; then
+            systemctl kill -s USR1 nginx.service 2>/dev/null || true
+        elif [ -s /run/nginx.pid ]; then
+            kill -USR1 \$(cat /run/nginx.pid) 2>/dev/null || true
+        fi
     endscript
 }
 
@@ -869,28 +941,29 @@ $logs_dir/php_*.log {
 }
 EOF
 
-# 6. Immutable Root-Owned State Manifest (Guarantees safe unbinding on deletion)
-cat > "/var/www/$DOMAIN/.bashboard-state" <<EOF
+# 6. Authoritative Root-Owned State Manifest (Stored in /etc/bashboard/sites/ AND root-anchored /var/www/$DOMAIN/)
+cat > "/etc/bashboard/sites/${DOMAIN}.state" <<EOF
 DOMAIN=$DOMAIN
 TENANT_USER=$vhost_user
+POOL_NAME=$pool_name
 DB_NAME=$DB_NAME
 DB_USER=$DB_USER
 PHP_VER=$PHP_VER
 CREATED_AT=$(date -u +%s)
 EOF
+chown root:root "/etc/bashboard/sites/${DOMAIN}.state"
+chmod 600 "/etc/bashboard/sites/${DOMAIN}.state"
+cp -f "/etc/bashboard/sites/${DOMAIN}.state" "/var/www/$DOMAIN/.bashboard-state"
 chown root:root "/var/www/$DOMAIN/.bashboard-state"
 chmod 600 "/var/www/$DOMAIN/.bashboard-state"
 
 # ------------------------------------------------------------------------------
 # 12. LET'S ENCRYPT AUTOMATION ENGINE (Interface-First IP & Graceful Subdomains)
 # ------------------------------------------------------------------------------
-# Queries public DNS resolvers directly via UDP/TCP & IP-based DoH without
-# touching /etc/hosts or local nsswitch cache.
 resolve_public_ip() {
     local target_d="$1"
     local ip=""
 
-    # Tier 1: Direct UDP/TCP query via dig (Fastest, natively resolves CNAME chains for www/uploads)
     if command -v dig >/dev/null 2>&1; then
         for ns in 1.1.1.1 8.8.8.8 9.9.9.9; do
             ip=$(dig +short +time=2 +tries=1 @"$ns" "$target_d" A 2>/dev/null \
@@ -902,7 +975,6 @@ resolve_public_ip() {
         done
     fi
 
-    # Tier 2: Direct IP-based DoH (Bypasses local DNS resolution & UDP port 53 blocks)
     for doh_endpoint in \
         "https://1.1.1.1/dns-query?name=${target_d}&type=A" \
         "https://8.8.8.8/resolve?name=${target_d}&type=A"; do
@@ -915,7 +987,6 @@ resolve_public_ip() {
         fi
     done
 
-    # Tier 3: Direct query via host utility (if available)
     if command -v host >/dev/null 2>&1; then
         for ns in 1.1.1.1 8.8.8.8; do
             ip=$(host -t A -W 2 "$target_d" "$ns" 2>/dev/null \
@@ -930,7 +1001,6 @@ resolve_public_ip() {
     echo ""
 }
 
-# Collects all valid public IPv4s assigned to this server (NIC + cached + outbound)
 get_server_public_ips() {
     local ips=()
     local nic_ip cached_ip ext_ip
@@ -966,7 +1036,6 @@ get_server_public_ips() {
 issue_letsencrypt_ssl() {
     local domain="$1"
     local enable_media="${2:-0}"
-    local admin_email="admin@${domain}"
 
     echo -e "\n   [8/8] Automated Let's Encrypt TLS Engine..."
 
@@ -1006,7 +1075,6 @@ issue_letsencrypt_ssl() {
             verified_domains+=("$d")
         else
             if [[ "$d" == "$domain" ]]; then
-                # Primary apex domain failed DNS check -> abort Let's Encrypt entirely
                 echo -e "         ${YELLOW}⚠️  DNS pre-flight check bypassed for primary domain '$d':${NC}"
                 echo -e "            Domain points to : ${RED}${resolved_ip:-Unresolved}${NC}"
                 echo -e "            Server Public IP : ${GREEN}${primary_server_ip}${NC}"
@@ -1014,7 +1082,6 @@ issue_letsencrypt_ssl() {
                 echo -e "         ${GRAY}Self-signed fallback certificate remains active.${NC}"
                 return 0
             else
-                # Optional subdomain (www or uploads) is unresolved -> skip only the subdomain, proceed with apex!
                 echo -e "         ${YELLOW}ℹ️  Subdomain '$d' DNS is ${RED}${resolved_ip:-Unresolved}${YELLOW} (expected ${GREEN}${primary_server_ip}${YELLOW}). Excluding '$d' from cert request.${NC}"
             fi
         fi
@@ -1026,15 +1093,14 @@ issue_letsencrypt_ssl() {
     done
 
     mkdir -p "$project_root/.well-known/acme-challenge"
-    chown -R "$vhost_user:www-data" "$project_root/.well-known"
+    chown -R "$vhost_user:$vhost_user" "$project_root/.well-known"
     chmod -R 755 "$project_root/.well-known"
 
     echo -e "         DNS verified for [${verified_domains[*]}]! Requesting official TLS certificate..."
     if certbot certonly --webroot -w "$project_root" \
         --cert-name "$domain" \
         --non-interactive --agree-tos \
-        --email "$admin_email" \
-        --no-eff-email \
+        --register-unsafely-without-email \
         --keep-until-expiring \
         "${domain_args[@]}" >> /var/log/bashboard_ssl.log 2>&1; then
 
@@ -1042,7 +1108,6 @@ issue_letsencrypt_ssl() {
         local le_privkey="/etc/letsencrypt/live/${domain}/privkey.pem"
 
         if [[ -f "$le_fullchain" && -f "$le_privkey" ]]; then
-            # Cleanly swap self-signed paths with official Let's Encrypt PEMs without mutating VHost structure
             sed -i "s|ssl_certificate[[:space:]]\+$cert_file;|ssl_certificate     $le_fullchain;|g" "$nginx_conf"
             sed -i "s|ssl_certificate_key[[:space:]]\+$key_file;|ssl_certificate_key $le_privkey;|g" "$nginx_conf"
 
@@ -1051,14 +1116,12 @@ issue_letsencrypt_ssl() {
                 rm -f "$cert_file" "$key_file"
                 echo -e "         ${GREEN}✅ Let's Encrypt certificate cleanly bound for: ${verified_domains[*]}${NC}"
             else
-                # Revert to self-signed if syntax check fails
                 sed -i "s|ssl_certificate[[:space:]]\+$le_fullchain;|ssl_certificate     $cert_file;|g" "$nginx_conf"
                 sed -i "s|ssl_certificate_key[[:space:]]\+$le_privkey;|ssl_certificate_key $key_file;|g" "$nginx_conf"
                 echo -e "         ${RED}❌ Nginx reload failed with new cert; reverted to self-signed fallback.${NC}"
             fi
         fi
 
-        # Guarantee automated Nginx reload upon future Certbot renewals
         mkdir -p /etc/letsencrypt/renewal-hooks/deploy
         cat > /etc/letsencrypt/renewal-hooks/deploy/bashboard-nginx-reload.sh <<'EOF'
 #!/usr/bin/env bash
@@ -1079,8 +1142,6 @@ fi
 # ------------------------------------------------------------------------------
 # 12.5 UNIVERSAL LOCAL LOOPBACK PINNING (/etc/hosts)
 # ------------------------------------------------------------------------------
-# Executed strictly AFTER Let's Encrypt validation to prevent local resolver
-# collisions while guaranteeing zero-latency internal loopback for WP-Cron/REST.
 extra_hosts_entries=""
 [ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ] && extra_hosts_entries="uploads.$DOMAIN"
 
@@ -1101,11 +1162,11 @@ echo -e "Primary Domain:        ${YELLOW}https://$DOMAIN${NC}"
 echo -e "Canonical Redirect:    ${WHITE}https://www.$DOMAIN -> https://$DOMAIN (301)${NC}"
 [[ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ]] && echo -e "Uploads Subdomain:     ${YELLOW}https://uploads.$DOMAIN${NC} (Root: ${WHITE}$media_root${NC})"
 echo -e "Payload Architecture:  ${WHITE}$( [ "$PAYLOAD_TYPE" == "wordpress" ] && echo "Standard WordPress" || echo "Blank Site" )${NC}"
-echo -e "Isolated Tenant User:  ${CYAN}${vhost_user}${NC} (Isolated Parent 750 / C1 Hardened 600)"
+echo -e "Isolated Tenant User:  ${CYAN}${vhost_user}${NC} (Root-Anchored Parent 750 / C1 & C2 Immune)"
 echo -e "Temp & Session Sandbox:${WHITE}$tmp_dir${NC} ${GREEN}(chmod 700 / sys_temp_dir)${NC}"
-echo -e "PHP-FPM Worker Ceiling:${WHITE}${safe_max_workers} Workers${NC} ${GREEN}(Rebalanced & Syscall Locked)${NC}"
+echo -e "PHP-FPM Worker Ceiling:${WHITE}${safe_max_workers} Workers${NC} ${GREEN}(Rebalanced & Function Locked)${NC}"
 echo -e "Security Hardening:    ${GREEN}Brute-Force Rate Limiting Active (/wp-login.php)${NC}"
-echo -e "Dedicated Logrotate:   ${WHITE}/etc/logrotate.d/vhost-$DOMAIN${NC} ${GREEN}(Deadlock Free)${NC}"
+echo -e "Dedicated Logrotate:   ${WHITE}/etc/logrotate.d/vhost-$DOMAIN${NC} ${GREEN}(CVE-2016-1247 Safe)${NC}"
 echo -e "Web Setup Entrypoint:  ${CYAN}$setup_url${NC}"
 
 if [ "$PAYLOAD_TYPE" == "wordpress" ]; then

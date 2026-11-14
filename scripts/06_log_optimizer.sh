@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BASHBOARD MODULE: [06] Enterprise Log Rotation & Disk Space Optimizer
-# Version:          1.8.0 (Production Hardened: State-Manifest Tenant Lookup,
-#                   Orphaned Drop-in Sanitizer, Journal Vacuum, Zero-Log-Drop)
+# Version:          1.8.0 (Zero-Trust Hardened: CVE-2016-1247 Symlink-Safe Logs
+#                   750 www-data:$vhost_user, Clean USR1 Postrotate, Vacuum)
 # Architecture:     Multi-Layer Log Rotation | Journal Vacuum | Zero-Crash SRE
 # Platform:         Debian 11/12, Ubuntu 20.04/22.04/24.04/26.04 LTS
 # ==============================================================================
@@ -196,7 +196,7 @@ echo -e "   🚀 ${BOLD}${WHITE}Applying Enterprise Log Retention & Disk Reclama
 echo -e "${CYAN}==================================================================${NC}\n"
 
 # ------------------------------------------------------------------------------
-# 6.1 MULTI-TENANT DEDICATED LOGROTATE SYNCHRONIZATION
+# 6.1 MULTI-TENANT DEDICATED LOGROTATE SYNCHRONIZATION (Resolves C1 & C2)
 # ------------------------------------------------------------------------------
 if [ "$OPTIMIZE_VHOSTS" -eq 1 ]; then
     echo -e "${BLUE}--- [1/3] Synchronizing Tenant-Dedicated Logrotate Drop-ins ---${NC}"
@@ -221,38 +221,62 @@ if [ "$OPTIMIZE_VHOSTS" -eq 1 ]; then
     shopt -u nullglob
 
     for d in "${domains[@]}"; do
-        if [ -d "$d/logs" ]; then
+        if [ -d "$d/logs" ] && [ ! -L "$d/logs" ]; then
             domain_name=$(basename "$d")
             vhost_user=""
 
-            if [ -f "$d/.bashboard-state" ]; then
+            if [ -f "/etc/bashboard/sites/${domain_name}.state" ]; then
+                vhost_user=$(grep -E "^TENANT_USER=" "/etc/bashboard/sites/${domain_name}.state" 2>/dev/null | cut -d'=' -f2- || true)
+            elif [ -f "$d/.bashboard-state" ] && [ ! -L "$d/.bashboard-state" ] && [ "$(stat -c '%u' "$d/.bashboard-state" 2>/dev/null)" = "0" ]; then
                 vhost_user=$(grep -E "^TENANT_USER=" "$d/.bashboard-state" 2>/dev/null | cut -d'=' -f2- || true)
             fi
             if [[ -z "$vhost_user" ]] || ! id -u "$vhost_user" >/dev/null 2>&1; then
-                vhost_user=$(stat -c '%U' "$d/public_html" 2>/dev/null || stat -c '%U' "$d" 2>/dev/null || echo "www-data")
+                vhost_user=$(stat -c '%U' "$d/public_html" 2>/dev/null || echo "www-data")
             fi
-            if ! id -u "$vhost_user" >/dev/null 2>&1 || [[ "$vhost_user" == "root" ]]; then
+            if ! id -u "$vhost_user" >/dev/null 2>&1 || [[ ! "$vhost_user" =~ ^v_[a-z0-9_]+$ ]]; then
                 vhost_user="www-data"
+            else
+                # Ensure root-anchored parent & www-data group membership (C1 & C2)
+                usermod -a -G "$vhost_user" www-data 2>/dev/null || true
+                chown "root:$vhost_user" "$d" 2>/dev/null || true
+                chmod 750 "$d" 2>/dev/null || true
             fi
 
             logs_dir="$d/logs"
-            chown -R "$vhost_user:www-data" "$logs_dir" 2>/dev/null || true
-            chmod 770 "$logs_dir" 2>/dev/null || true
+            chown "www-data:$vhost_user" "$logs_dir" 2>/dev/null || true
+            chmod 750 "$logs_dir" 2>/dev/null || true
+
+            for nlog in "$logs_dir"/*access.log "$logs_dir"/*error.log; do
+                if [ -f "$nlog" ] && [ ! -L "$nlog" ]; then
+                    chown "www-data:$vhost_user" "$nlog" 2>/dev/null || true
+                    chmod 640 "$nlog" 2>/dev/null || true
+                fi
+            done
+            for plog in "$logs_dir"/php_*.log; do
+                if [ -f "$plog" ] && [ ! -L "$plog" ]; then
+                    chown "$vhost_user:www-data" "$plog" 2>/dev/null || true
+                    chmod 640 "$plog" 2>/dev/null || true
+                fi
+            done
 
             cat > "/etc/logrotate.d/vhost-$domain_name" <<EOF
-# Bashboard Dedicated Logrotate Policy for $domain_name
+# Bashboard Dedicated Logrotate Policy for $domain_name (CVE-2016-1247 Safe)
 $logs_dir/*access.log $logs_dir/*error.log {
-    su $vhost_user www-data
+    su www-data $vhost_user
     ${ROTATE_FREQUENCY}
     missingok
     rotate ${LOG_RETENTION}
     compress
     delaycompress
     notifempty
-    create 0640 $vhost_user www-data
+    create 0640 www-data $vhost_user
     sharedscripts
     postrotate
-        systemctl kill -s USR1 nginx.service 2>/dev/null || [ -s /run/nginx.pid ] && kill -USR1 \$(cat /run/nginx.pid) || true
+        if systemctl is-active --quiet nginx.service 2>/dev/null; then
+            systemctl kill -s USR1 nginx.service 2>/dev/null || true
+        elif [ -s /run/nginx.pid ]; then
+            kill -USR1 \$(cat /run/nginx.pid) 2>/dev/null || true
+        fi
     endscript
 }
 
