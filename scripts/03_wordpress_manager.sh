@@ -211,6 +211,18 @@ wp_run() {
     mkdir -p "/var/www/$SELECTED_DOMAIN/tmp/wp-cache" 2>/dev/null || true
     chown "$u:$u" "/var/www/$SELECTED_DOMAIN/tmp/wp-cache" 2>/dev/null || true
 
+    # (
+    #     cd "$WP_PATH"
+    #     runuser -u "$u" -- env HOME="/var/www/$SELECTED_DOMAIN" \
+    #         WP_CLI_CACHE_DIR="/var/www/$SELECTED_DOMAIN/tmp/wp-cache" \
+    #         "$SITE_PHP_BIN" \
+    #         -d memory_limit=512M \
+    #         -d include_path=".:${WP_PATH}" \
+    #         -d open_basedir="/var/www/${SELECTED_DOMAIN}/:/usr/local/bin/wp:phar:///usr/local/bin/wp:/usr/share/zoneinfo/:/dev/urandom" \
+    #         -d disable_functions="exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,show_source,highlight_file,proc_get_status,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid" \
+    #         -d error_reporting="E_ALL & ~E_WARNING & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE" \
+    #         /usr/local/bin/wp --path="$WP_PATH" "$@"
+    # )
     (
         cd "$WP_PATH"
         runuser -u "$u" -- env HOME="/var/www/$SELECTED_DOMAIN" \
@@ -219,10 +231,10 @@ wp_run() {
             -d memory_limit=512M \
             -d display_errors=0 \
             -d include_path=".:${WP_PATH}" \
-            -d open_basedir="/var/www/${SELECTED_DOMAIN}/:/usr/local/bin/wp:phar:///usr/local/bin/wp:/usr/share/zoneinfo/:/dev/urandom" \
+            -d open_basedir="/var/www/${SELECTED_DOMAIN}/:/usr/local/bin/wp:/usr/share/zoneinfo/:/dev/urandom" \
             -d disable_functions="exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,show_source,highlight_file,proc_get_status,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid" \
             -d error_reporting="E_ALL & ~E_WARNING & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE" \
-            /usr/local/bin/wp --path="$WP_PATH" "$@"
+            /usr/local/bin/wp --no-color --path="$WP_PATH" "$@"
     )
 }
 
