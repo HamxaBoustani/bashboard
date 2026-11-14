@@ -888,7 +888,7 @@ echo -e "   [7/8] Applying Root-Anchored POSIX isolation & Symlink-Safe Logrotat
 
 # 1. Root-Anchored Base Directory (root:$vhost_user 750):
 #    - Tenant & www-data (in group $vhost_user) can traverse (r-x), Other = --- (Zero cross-tenant access).
-#    - Because 'root' owns /var/www/$DOMAIN, the tenant CANNOT unlink .bashboard-state or rename logs/!
+#    - Because 'root' owns /var/www/$DOMAIN, the tenant CANNOT unlink state files or rename logs/!
 chown "root:$vhost_user" "/var/www/$DOMAIN"
 chmod 750 "/var/www/$DOMAIN"
 
@@ -941,7 +941,7 @@ $logs_dir/php_*.log {
 }
 EOF
 
-# 6. Authoritative Root-Owned State Manifest (Stored in /etc/bashboard/sites/ AND root-anchored /var/www/$DOMAIN/)
+# 6. Authoritative Root-Owned State Manifest (Stored strictly in /etc/bashboard/sites/)
 cat > "/etc/bashboard/sites/${DOMAIN}.state" <<EOF
 DOMAIN=$DOMAIN
 TENANT_USER=$vhost_user
@@ -953,9 +953,42 @@ CREATED_AT=$(date -u +%s)
 EOF
 chown root:root "/etc/bashboard/sites/${DOMAIN}.state"
 chmod 600 "/etc/bashboard/sites/${DOMAIN}.state"
-# cp -f "/etc/bashboard/sites/${DOMAIN}.state" "/var/www/$DOMAIN/.bashboard-state"
-# chown root:root "/var/www/$DOMAIN/.bashboard-state"
-# chmod 600 "/var/www/$DOMAIN/.bashboard-state"
+rm -f "/var/www/$DOMAIN/.bashboard-state" 2>/dev/null || true
+
+# 7. Deploy Global 'domain' CLI Helper & Bash Completion for Administrative Tenant Shell Access
+cat > "/usr/local/bin/domain" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+dom="${1:-}"
+if [[ -z "$dom" ]]; then
+    echo "Available isolated virtual hosts:"
+    sudo find /var/www -mindepth 1 -maxdepth 1 -type d ! -name "html" -printf "  - %f\n" 2>/dev/null | sort
+    echo "Usage: domain <domain.com>"
+    exit 1
+fi
+if ! sudo test -d "/var/www/$dom/public_html"; then
+    echo "❌ Error: Virtual host '/var/www/$dom/public_html' not found!" >&2
+    exit 1
+fi
+vuser=$(sudo stat -c '%U' "/var/www/$dom/public_html")
+echo -e "\033[1;36m>>> Entering isolated shell for \033[1;33m$dom\033[1;36m (Tenant: \033[1;32m$vuser\033[1;36m) — Type 'exit' to return <<<\033[0m"
+exec sudo -u "$vuser" -- env HOME="/var/www/$dom" bash -c "cd '/var/www/$dom/public_html' && exec /bin/bash"
+EOF
+chmod 755 "/usr/local/bin/domain"
+
+if [ -d "/etc/bash_completion.d" ]; then
+    cat > "/etc/bash_completion.d/bashboard-domain" <<'EOF'
+_bashboard_domain_complete() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local sites=""
+    if [ -d /etc/nginx/sites-available ]; then
+        sites=$(find /etc/nginx/sites-available -maxdepth 1 -type f ! -name "default" -printf "%f " 2>/dev/null)
+    fi
+    COMPREPLY=( $(compgen -W "$sites" -- "$cur") )
+}
+complete -F _bashboard_domain_complete domain
+EOF
+fi
 
 # ------------------------------------------------------------------------------
 # 12. LET'S ENCRYPT AUTOMATION ENGINE (Interface-First IP & Graceful Subdomains)
@@ -1163,6 +1196,7 @@ echo -e "Canonical Redirect:    ${WHITE}https://www.$DOMAIN -> https://$DOMAIN (
 [[ "$ENABLE_MEDIA_SUBDOMAIN" -eq 1 ]] && echo -e "Uploads Subdomain:     ${YELLOW}https://uploads.$DOMAIN${NC} (Root: ${WHITE}$media_root${NC})"
 echo -e "Payload Architecture:  ${WHITE}$( [ "$PAYLOAD_TYPE" == "wordpress" ] && echo "Standard WordPress" || echo "Blank Site" )${NC}"
 echo -e "Isolated Tenant User:  ${CYAN}${vhost_user}${NC} (Root-Anchored Parent 750 / C1 & C2 Immune)"
+echo -e "Enter Tenant Shell:    ${YELLOW}domain $DOMAIN${NC}"
 echo -e "Temp & Session Sandbox:${WHITE}$tmp_dir${NC} ${GREEN}(chmod 700 / sys_temp_dir)${NC}"
 echo -e "PHP-FPM Worker Ceiling:${WHITE}${safe_max_workers} Workers${NC} ${GREEN}(Rebalanced & Function Locked)${NC}"
 echo -e "Security Hardening:    ${GREEN}Brute-Force Rate Limiting Active (/wp-login.php)${NC}"
