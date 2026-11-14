@@ -92,14 +92,15 @@ bashboard/
 ### `[2]` Virtual Host & Tenant Provisioner (`02_create_vhost.sh`)
 * **Collision-Resistant Hashed Identifiers:** Appends a 4-character MD5 domain hash suffix to the Linux tenant user (`v_${slug}_${hash}`), PHP-FPM pool (`${slug}_${hash}`), database name (`${slug}_${hash}`), and database user (`u_${slug}_${hash}`), eliminating truncation collisions across multi-subdomain deployments.
 * **Root-Anchored Chroot-Style Directory Hierarchy (`C1` & `C2` Hardened):**
-  * Base directory `/var/www/$DOMAIN` is owned by **`root:$vhost_user` (`0750`)** with `www-data` added to group `$vhost_user`. Because `root` owns the parent directory, a compromised tenant cannot `unlink` or tamper with `.bashboard-state` or rename the `logs/` directory.
-  * Authoritative state manifests are stored in root-restricted **`/etc/bashboard/sites/${DOMAIN}.state` (`0600`)**.
+  * Base directory `/var/www/$DOMAIN` is owned by **`root:$vhost_user` (`0750`)** with `www-data` added to group `$vhost_user`. Because `root` owns the parent directory, a compromised tenant cannot tamper with parent structures or rename the `logs/` directory.
+  * Authoritative state manifests are stored strictly outside the tenant tree in root-restricted **`/etc/bashboard/sites/${DOMAIN}.state` (`0600`)**.
   * Logs directory `/var/www/$DOMAIN/logs` is owned by **`www-data:$vhost_user` (`0750`)**, giving the tenant read-only access to logs while preventing `CVE-2016-1247` symlink privilege escalation during Nginx reloads or logrotate cycles.
 * **PHP-FPM Sandboxing (`open_basedir` + `disable_functions`):** Isolates temporary files and sessions into `/var/www/$DOMAIN/tmp/` (`0700`), removes global `/tmp/` from `open_basedir`, hides `expose_php`, blocks `xmlrpc.php` at the Nginx layer, and disables shell-spawning functions (`exec`, `passthru`, `shell_exec`, `system`, `proc_open`, `popen`, `pcntl_exec`, `show_source`, `highlight_file`, `proc_get_status`, `posix_*`).
 * **Catch-All Default Server & Webroot ACME TLS:** Deploys a `default_server` catch-all block (`00-bashboard-default-catchall.conf`) returning HTTP `444` to prevent unknown Host headers from hitting tenant sites. Verifies public DNS (`dig` -> IP DoH -> `host`) against kernel interface IPs and issues Let's Encrypt certificates via `certbot certonly --webroot` without mutating Nginx configuration structure. Gracefully excludes unconfigured optional subdomains (`uploads` or `www`) rather than aborting primary domain TLS issuance.
+* **Global `domain` Tenant Shell Switcher:** Deploys `/usr/local/bin/domain` (with Bash `Tab` auto-completion in `/etc/bash_completion.d/bashboard-domain`), allowing administrators to drop directly into any site's isolated tenant shell (`domain example.com`) without polluting file ownership as `root`.
 
 ### `[3]` WordPress Site Manager (`03_wordpress_manager.sh`)
-* **Sandboxed Multi-PHP CLI & Cron Execution (`C3` Hardened):** Reads `PHP_VER` from `/etc/bashboard/sites/${DOMAIN}.state` and executes both interactive WP-CLI commands (`wp_run`) and background cron jobs (`/usr/local/bin/bashboard-cron-runner`) under the tenant user (`runuser -u`) with explicit `-d open_basedir=...` and `-d disable_functions=...` flags, ensuring CLI/Cron cannot be used by rogue plugins to bypass FPM restrictions.
+* **Sandboxed Multi-PHP CLI & Cron Execution (`C3` Hardened):** Reads `PHP_VER` from `/etc/bashboard/sites/${DOMAIN}.state` and executes both interactive WP-CLI commands (`wp_run`) and background cron jobs (`/usr/local/bin/bashboard-cron-runner`) under the tenant user (`runuser -u`) with CWD pinned to `$WP_PATH`, `include_path` restricted, and explicit `-d open_basedir=...` and `-d disable_functions=...` flags applied.
 * **Symlink-Safe Permission Enforcer & Stdin Password Piping:** Executes recursive `chmod` operations under the unprivileged tenant user context to prevent root symlink race conditions, and pipes administrator passwords via `stdin` (`--prompt=user_pass`) so credentials never appear in `/proc` or `ps` process tables.
 * **Persistent Maintenance Mode:** Writes a 1-year future integer timestamp into `.maintenance` to prevent WordPress's 10-minute auto-expiration timeout and clears stale `core_updater.lock` database options upon deactivation.
 * **Direct Non-Locking Database Exports:** Uses `mariadb-dump --single-transaction --quick` directly in Option `[8]` so database backups succeed without requiring `proc_open` inside PHP-CLI.
@@ -138,6 +139,8 @@ Beyond individual virtual host directories (`/var/www/$DOMAIN`), Bashboard creat
 | `/var/log/bashboard_ssl.log` | `02_create_vhost.sh` | Certbot ACME issuance and verification log. |
 | `/var/log/bashboard_backup.log` | `12_backup_gdrive.sh` | Nightly unattended Google Drive backup execution log. |
 | `/usr/local/bin/wp` | `01` / `03` | Official WP-CLI PHAR binary (`0755`). |
+| `/usr/local/bin/domain` | `02_create_vhost.sh` | CLI helper to enter any site's isolated tenant shell (`domain <site.com>`). |
+| `/etc/bash_completion.d/bashboard-domain` | `02_create_vhost.sh` | Bash `Tab` auto-completion script for the `domain` CLI command. |
 | `/usr/local/bin/bashboard-cron-runner` | `03_wordpress_manager.sh` | Sandboxed Multi-PHP `flock` wrapper executing WP-Cron and Action Scheduler tasks. |
 | `/etc/nginx/conf.d/00-cloudflare-realip.conf` | `01_install_lemp.sh` | Cloudflare IPv4/IPv6 ranges for restoring visitor IPs (`CF-Connecting-IP`). |
 | `/etc/nginx/conf.d/00-bashboard-rate-limit.conf` | `01` / `02` | Global Nginx `limit_req_zone` (`wplogin`, 10 req/min, HTTP 429). |
@@ -183,7 +186,26 @@ chown -R root:root /opt/bashboard
 
 ## ⚙️ Operator Configuration Guides
 
-### 1. Accessing Sandboxed phpMyAdmin via SSH Tunnel (`127.0.0.1:8080`)
+### 1. Navigating & Editing Site Files via the `domain` CLI Helper
+
+Because each virtual host's parent directory (`/var/www/$DOMAIN`) is locked down to `0750` (`root:$vhost_user`), standard non-root SSH users cannot `cd` directly into `/var/www/$DOMAIN`, and editing files directly as `root` can accidentally break file ownership for WordPress updates.
+
+Bashboard automatically installs the **`domain`** command-line utility (`/usr/local/bin/domain`) with Bash `Tab` auto-completion to solve this:
+
+```bash
+# 1. List all available isolated virtual hosts on the server:
+domain
+
+# 2. Enter a specific site's isolated tenant shell (supports Tab auto-completion):
+domain example.com
+```
+* **What happens:** You are immediately dropped into `/var/www/example.com/public_html` running strictly under that site's unprivileged tenant identity (`v_example_com_xxxx`).
+* Any files you create, edit (`nano`), or extract (`unzip`/`tar`) inside this shell automatically inherit the exact tenant user and group ownership required by PHP-FPM and WordPress.
+* When finished, simply type **`exit`** (or press `Ctrl+D`) to return to your administrative shell.
+
+---
+
+### 2. Accessing Sandboxed phpMyAdmin via SSH Tunnel (`127.0.0.1:8080`)
 
 When installed via Module **`[1]`**, phpMyAdmin is bound strictly to `127.0.0.1:8080` and runs under an isolated system account (`v_pma_sys`). It is completely invisible to the public internet.
 
@@ -200,7 +222,7 @@ To access phpMyAdmin from your local workstation:
 
 ---
 
-### 2. Google Drive Off-Site Backup Setup (`rclone`)
+### 3. Google Drive Off-Site Backup Setup (`rclone`)
 
 Bashboard uses `rclone` to stream backups to Google Drive. Because a Linux VPS has no local web browser, authorization is performed headlessly.
 
@@ -270,7 +292,7 @@ Once verified, launch `./bashboard.sh`, select **`[12]`**, press **`[9]`** to ru
 
 ---
 
-### 3. Configuring the Static Media Subdomain (`uploads.domain.com`)
+### 4. Configuring the Static Media Subdomain (`uploads.domain.com`)
 
 When deploying a Virtual Host in Module **`[2]`**, toggling Option **`[4] Uploads Subdomain`** to `ENABLED` provisions:
 1. A dedicated directory at `/var/www/example.com/public_html/uploads`.
@@ -288,7 +310,7 @@ Because Bashboard does not hardcode media URLs into your database automatically,
 
 ---
 
-### 4. Cloudflare & DNS Pre-Flight Considerations
+### 5. Cloudflare & DNS Pre-Flight Considerations
 
 Module **`[2]`** performs a strict Pre-Flight DNS check against public resolvers (`1.1.1.1`, `8.8.8.8`, `9.9.9.9`) before invoking Let's Encrypt:
 * When provisioning a **new site**, set your domain's `A` record (`@`) and `www` record in Cloudflare to **DNS Only (Grey Cloud)** so the public DNS resolves directly to your VPS IPv4 address.
@@ -315,19 +337,22 @@ When configuring a brand-new production node, follow this sequence:
 
 Verify your server's runtime health and security isolation using these commands:
 
-### 1. Verify Multi-Tenant POSIX Isolation & Root-Anchored Parent (`C1` & `C2` Test)
+### 1. Verify Multi-Tenant POSIX Isolation & Root-Anchored Hierarchy (`C1` & `C2` Test)
 ```bash
 # 1. Verify parent directory is owned by root:$vhost_user (0750) and logs by www-data:$vhost_user (0750):
-ls -ld /var/www/example.com /var/www/example.com/logs
+sudo ls -ld /var/www/example.com /var/www/example.com/logs
 # Must show:
 # drwxr-x--- 5 root     v_example_com_xxxx 4096 ... /var/www/example.com
 # drwxr-x--- 2 www-data v_example_com_xxxx 4096 ... /var/www/example.com/logs
 
-# 2. Verify tenant cannot unlink root-anchored state file:
-sudo -u v_example_com_xxxx rm -f /var/www/example.com/.bashboard-state
-# Expected Output: rm: cannot remove '.../.bashboard-state': Permission denied
+# 2. Verify authoritative state manifests are isolated in /etc/bashboard/sites/ (0600):
+sudo ls -la /etc/bashboard/sites/
 
-# 3. Verify Site B cannot read Site A's wp-config.php:
+# 3. Verify tenant cannot rename logs/ or create symlinks inside logs/ (CVE-2016-1247 immunity):
+sudo -u v_example_com_xxxx ln -s /etc/passwd /var/www/example.com/logs/nginx_error.log
+# Expected Output: ln: failed to create symbolic link '...': Permission denied
+
+# 4. Verify Site B cannot read Site A's wp-config.php:
 sudo -u v_site_b_yyyy cat /var/www/site-a.com/public_html/wp-config.php
 # Expected Output: cat: .../wp-config.php: Permission denied
 ```
@@ -340,27 +365,30 @@ sudo -u v_example_com_xxxx php -d open_basedir="/var/www/example.com/:/dev/urand
 # Expected Output: BLOCKED
 
 # 2. Inspect disabled functions in the tenant's pool configuration:
-grep "disable_functions" /etc/php/*/fpm/pool.d/example_com_*.conf
+sudo grep "disable_functions" /etc/php/*/fpm/pool.d/example_com_*.conf
 ```
 
 ### 3. Verify Zero-Trust Upload Sandboxing & XML-RPC Block
 ```bash
 # 1. Create a dummy PHP file inside the uploads directory
-echo "<?php phpinfo(); ?>" > /var/www/example.com/public_html/wp-content/uploads/test.php
+echo "<?php phpinfo(); ?>" | sudo tee /var/www/example.com/public_html/wp-content/uploads/test.php >/dev/null
 
 # 2. Request via curl (Must return 403 Forbidden or 404 Not Found, NEVER 200 OK)
 curl -k -I https://example.com/wp-content/uploads/test.php
-rm -f /var/www/example.com/public_html/wp-content/uploads/test.php
+sudo rm -f /var/www/example.com/public_html/wp-content/uploads/test.php
 
 # 3. Verify XML-RPC is blocked with 403 Forbidden:
 curl -k -I https://example.com/xmlrpc.php
 ```
 
-### 4. Verify Sandboxed WP-Cron Offloading
+### 4. Verify Sandboxed WP-Cron Offloading & `domain` Helper
 ```bash
-# Inspect the active system cron drop-in and runner:
-cat /etc/cron.d/bashboard-wp-*
+# 1. Inspect the active system cron drop-in and sandboxed runner:
+sudo cat /etc/cron.d/bashboard-wp-*
 cat /usr/local/bin/bashboard-cron-runner
+
+# 2. Drop into the site's isolated tenant shell interactively:
+domain example.com
 ```
 
 ---
@@ -375,9 +403,10 @@ cat /usr/local/bin/bashboard-cron-runner
   sudo rclone lsd bashboard-gdrive:
   ```
 
-### 2. Let's Encrypt Pre-Flight Skipped (Domain Points to Cloudflare IP or Unresolved)
-* **Cause:** Either the domain's DNS has not propagated to public resolvers (`1.1.1.1` / `8.8.8.8`), or Cloudflare Proxy (Orange Cloud) is hiding the server's real IP during initial setup.
-* **Fix:** Set the DNS record to **DNS Only (Grey Cloud)** in Cloudflare, wait 1–2 minutes, and issue the certificate cleanly via Webroot without recreating the site:
+### 2. Let's Encrypt Pre-Flight Skipped or Rate-Limited
+* **Cause 1 (DNS / Proxy):** Either the domain's DNS has not propagated to public resolvers (`1.1.1.1` / `8.8.8.8`), or Cloudflare Proxy (Orange Cloud) is hiding the server's real IP during initial setup.
+* **Cause 2 (Rate Limit):** Recreating and deleting the same domain more than 5 times within 7 days triggers Let's Encrypt's Duplicate Certificate limit (`too many certificates (5) already issued for this exact set of identifiers`).
+* **Fix:** Ensure DNS is set to **DNS Only (Grey Cloud)** in Cloudflare and issue the certificate via Webroot (if rate-limited on `[domain + www]`, request `-d example.com` alone or add `-d uploads.example.com` to alter the identifier set):
   ```bash
   sudo certbot certonly --webroot -w /var/www/example.com/public_html \
     --cert-name example.com --non-interactive --agree-tos \
@@ -393,14 +422,14 @@ cat /usr/local/bin/bashboard-cron-runner
 If Nginx responds with `502 Bad Gateway`, inspect the dedicated error log and socket:
 ```bash
 # 1. Tail the virtual host's dedicated error log
-tail -n 20 /var/www/example.com/logs/nginx_error.log
+sudo tail -n 20 /var/www/example.com/logs/nginx_error.log
 
 # 2. Verify that the dedicated PHP-FPM socket exists
-ls -la /run/php/php*-fpm-example_com_*.sock
+sudo ls -la /run/php/php*-fpm-example_com_*.sock
 # Must show: srw-rw---- 1 www-data www-data
 
 # 3. Validate PHP-FPM pool syntax across all installed versions
-for fpm in /usr/sbin/php-fpm*; do "$fpm" -t; done
+for fpm in /usr/sbin/php-fpm*; do sudo "$fpm" -t; done
 ```
 
 ### 4. WordPress White Screen of Death (WSOD)
