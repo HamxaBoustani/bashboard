@@ -3,22 +3,23 @@
 ![Version](https://img.shields.io/badge/Version-1.8.0-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-Ubuntu_22.04%20|%2024.04%20|%2026.04_LTS%20|%20Debian_11%20|%2012-lightgrey.svg?logo=linux)
 ![Architecture](https://img.shields.io/badge/Architecture-Modular_Bash_TUI_%7C_Zero--Daemon-green.svg)
-![Security](https://img.shields.io/badge/Security-POSIX_Isolated_%7C_Syscall_Locked-red.svg)
+![Security](https://img.shields.io/badge/Security-POSIX_Isolated_%7C_CLI_&_FPM_Sandboxed-red.svg)
 ![License](https://img.shields.io/badge/License-MIT-orange.svg)
 
 **Bashboard** is a zero-overhead, modular terminal control plane and automation suite written in Bash. Engineered for standalone Linux VPS instances hosting multiple internal projects, agency client sites, or private eCommerce stores, Bashboard provides automated LEMP stack deployment, per-site on-demand PHP-FPM resource isolation, non-locking offsite backups to Google Drive, and automated Nginx virtual host management without running persistent background control panel daemons.
 
 ---
 
-## 📌 Scope & Architectural Philosophy
+## 📌 Scope, Threat Model & Architectural Philosophy
 
 ### What Bashboard Is
 * **A Zero-Daemon CLI/TUI Control Plane:** Bashboard executes purely within an active administrative SSH session. When closed, **zero management processes or control panel daemons remain in RAM**. All available hardware resources are dedicated to Nginx, MariaDB, Redis, and PHP-FPM.
-* **A Blast-Radius Compartmentalizer:** Tailored for developer teams, agencies, and self-hosted server environments. If one WordPress site is compromised via a vulnerable plugin, POSIX permission boundaries (`0750`), PHP filesystem sandboxing (`open_basedir`), and kernel syscall restrictions (`disable_functions`) prevent lateral movement to neighboring virtual hosts or system files.
+* **A Blast-Radius Compartmentalizer:** Tailored for developer teams, agencies, and self-hosted server environments. If one WordPress site is compromised via a vulnerable plugin, Root-Anchored POSIX permission boundaries (`0750`), PHP filesystem sandboxing (`open_basedir`), and function lockdown (`disable_functions` across both PHP-FPM and PHP-CLI) prevent lateral movement to neighboring virtual hosts or system files.
 * **A Safe Operational Wrapper:** Replaces error-prone manual configuration with idempotent, rollback-aware Bash scripts that validate syntax (`nginx -t`, `php-fpm -t`, `sshd -t`, `logrotate -d`) prior to triggering service reloads.
 
-### What Bashboard Is Not
-* **Not Public Shared Hosting Infrastructure:** Bashboard is not a drop-in replacement for CloudLinux, CageFS, or cPanel when hosting untrusted, hostile third-party users. It relies on standard Linux POSIX permissions and PHP-FPM pool isolation rather than kernel-level `cgroups v2` resource virtualization or namespace `chroot` jails.
+### What Bashboard Is Not & Security Trade-Offs
+* **Not Public Shared Hosting Infrastructure:** Bashboard is not a drop-in replacement for CloudLinux, CageFS, or cPanel when hosting untrusted, hostile third-party customers. It relies on Linux POSIX permissions and PHP pool/CLI configuration rather than kernel-level `cgroups v2` resource virtualization or namespace `chroot` jails.
+* **`FS_METHOD = 'direct'` Usability Trade-Off:** To allow administrators to install and update plugins/themes with one click directly from the WordPress dashboard without FTP prompts, `/var/www/$DOMAIN/public_html` is writable by the site's dedicated tenant user (`v_<site>_<hash>`). While neighboring sites are completely blocked from accessing this directory, a remote code execution (RCE) vulnerability within a site's plugin can modify PHP files inside that specific site's `public_html`.
 
 ---
 
@@ -32,32 +33,31 @@
                          └───────────────┬───────────────┘
                                          ▼
                                 Nginx Reverse Proxy
-                 (HTTP/2 | TLS 1.3 | Cloudflare Real-IP | Rate-Limited)
+           (HTTP/2 | TLS 1.3 | Cloudflare Real-IP | 444 Default Catch-All)
                                          │
-                ┌────────────────────────┼────────────────────────┐
-                ▼                        ▼                        ▼
-      [ VHost: site-a.com ]    [ VHost: site-b.com ]    [ VHost: uploads.site-a ]
-       (User: v_site_a_xxxx)    (User: v_site_b_yyyy)     (Static Assets Only)
-         Parent Dir: 750          Parent Dir: 750        (PHP Execution DENIED)
-         Web Root: 755/644        Web Root: 755/644               │
-         wp-config: 600           wp-config: 600                  │
-         Temp: /site-a/tmp/       Temp: /site-b/tmp/              │
-                │                        │                        │
-       FastCGI Unix Socket      FastCGI Unix Socket               │
-    /run/php/...-site_a.sock  /run/php/...-site_b.sock            │
-                │                        │                        │
-                ▼                        ▼                        │
-        PHP-FPM Pool (A)         PHP-FPM Pool (B)                 │
-        (pm = ondemand)          (pm = ondemand)                  │
-        open_basedir Jail        open_basedir Jail                │
-        Syscalls Disabled        Syscalls Disabled                │
-        Dynamic RAM Sizing       Dynamic RAM Sizing               │
-                │                        │                        │
-                └───────────┬────────────┘                        │
-                            ▼                                     │
-           MariaDB Server (Unix Socket + Isolated DB Users)       │
-                            ▲                                     │
-           Redis Object Cache (systemd supervised) ───────────────┘
+        ┌────────────────────────────────┼────────────────────────────────┐
+        ▼                                ▼                                ▼
+[ VHost: site-a.com ]            [ VHost: site-b.com ]          [ Loopback: 127.0.0.1:8080 ]
+ (User: v_site_a_xxxx)            (User: v_site_b_yyyy)          (phpMyAdmin via SSH Tunnel)
+ Parent Dir: 750 (root:v_site_a)  Parent Dir: 750 (root:v_site_b) (User: v_pma_sys)
+ Logs Dir: 750 (www-data:v_site_a)Logs Dir: 750 (www-data:v_site_b)(No /var/www/* Access)
+ Web Root: 755/644 (v_site_a)     Web Root: 755/644 (v_site_b)            │
+ wp-config: 600                   wp-config: 600                          │
+ Temp: /site-a/tmp/ (700)         Temp: /site-b/tmp/ (700)                │
+        │                                │                                │
+FastCGI Unix Socket              FastCGI Unix Socket              FastCGI Unix Socket
+/run/php/...-site_a_xxxx.sock    /run/php/...-site_b_yyyy.sock    /run/php/...-phpmyadmin.sock
+        │                                │                                │
+        ▼                                ▼                                ▼
+PHP-FPM Pool & CLI (A)           PHP-FPM Pool & CLI (B)           PHP-FPM Pool (PMA)
+(pm = ondemand)                  (pm = ondemand)                  (pm = ondemand)
+open_basedir & Function Lock     open_basedir & Function Lock     open_basedir (/usr/share/...)
+        │                                │                                │
+        └────────────────────────────────┼────────────────────────────────┘
+                                         ▼
+                MariaDB Server (Unix Socket + Hashed Isolated DB Users)
+                                         ▲
+                Redis Object Cache (systemd supervised | Admin Commands Disabled)
 ```
 
 ---
@@ -69,55 +69,57 @@ bashboard/
 ├── bashboard.sh                    # Core TUI Monitor, Status Loop & Dynamic Dispatcher (v1.8.0)
 ├── README.md                       # Systems Architecture & Operator Manual
 └── scripts/                        # Modular Workload Engines
-    ├── 01_install_lemp.sh          # [1] Dual-OS LEMP Provisioner (Sury Keyring / Ondrej PPA)
-    ├── 02_create_vhost.sh          # [2] VHost Deployer (Webroot ACME TLS, Syscall Lock, Sandboxes)
-    ├── 03_wordpress_manager.sh     # [3] WP Manager (Multi-PHP CLI Pinning, 5m Cron, WSOD Fix)
-    ├── 04_harden_security.sh       # [4] Security Hardening (Anti-Lockout SSH, UFW, Fail2Ban)
-    ├── 06_log_optimizer.sh         # [6] Logrotate Optimizer (Orphan Sanitizer & Journal Vacuum)
+    ├── 01_install_lemp.sh          # [1] Dual-OS LEMP & Sandboxed phpMyAdmin Provisioner
+    ├── 02_create_vhost.sh          # [2] VHost Deployer (Root-Anchored Dir, Webroot ACME, FPM Lock)
+    ├── 03_wordpress_manager.sh     # [3] WP Manager (Sandboxed Multi-PHP CLI/Cron, WSOD Fix)
+    ├── 04_harden_security.sh       # [4] Security Hardening (Dual Anti-Lockout SSH, UFW, Fail2Ban)
+    ├── 06_log_optimizer.sh         # [6] Logrotate Optimizer (CVE-2016-1247 Safe & Journal Vacuum)
     ├── 07_delete_vhost.sh          # [7] Atomic 8-Tier Tenant Purge Engine (Manifest Driven)
-    └── 12_backup_gdrive.sh         # [12] Offsite Backup Engine (Headless Cron & Non-locking Dumps)
+    └── 12_backup_gdrive.sh         # [12] Offsite Backup Engine (Flock Guard & Non-locking Dumps)
 ```
 
 ---
 
 ## 🚀 Modular Engine Details
 
-### `[1]` LEMP Stack Provisioner (`01_install_lemp.sh`)
-* **Dual-OS Repository Management:** Detects Debian vs. Ubuntu via `/etc/os-release`. Imports official Sury GPG keyrings on Debian (`packages.sury.org`) and Ondrej PPAs on Ubuntu.
-* **Global Nginx Primitives:** Automatically unlinks the stock `/etc/nginx/sites-enabled/default` symlink to prevent vhost collisions, deploys Cloudflare Real-IP restoration (`/etc/nginx/conf.d/00-cloudflare-realip.conf`), and configures a global login rate-limiting zone (`wplogin` at `10r/m`).
-* **Dual-Mode MariaDB Authentication:** Preserves native `unix_socket` authentication on modern MariaDB (`10.4+`) alongside optional password authentication (`IDENTIFIED VIA unix_socket OR mysql_native_password`), ensuring headless root automation scripts never break when a password is set.
-* **Task Logging:** Diverts verbose package outputs to `/var/log/bashboard_lemp_install.log` while rendering real-time `[OK]` status lines.
+### `[1]` LEMP Stack & phpMyAdmin Provisioner (`01_install_lemp.sh`)
+* **Dual-OS Repository Management & Dynamic APT Resolver:** Detects Debian vs. Ubuntu via `/etc/os-release`. Imports official Sury GPG keyrings on Debian (`packages.sury.org`) and Ondrej PPAs on Ubuntu. Dynamically verifies package availability in APT cache (`apt-cache policy`) prior to installation, seamlessly handling PHP `8.5+` built-in `opcache` and generic PECL fallbacks (`php-redis`, `php-imagick`) with a 60-second `dpkg` lock timeout (`DPkg::Lock::Timeout=60`).
+* **Global Nginx Primitives:** Unlinks the stock `/etc/nginx/sites-enabled/default` symlink, deploys Cloudflare Real-IP restoration (`00-cloudflare-realip.conf`), and configures a global login rate-limiting zone (`wplogin` at `10r/m`).
+* **Dual-Mode MariaDB Authentication:** Preserves native `unix_socket` authentication on MariaDB (`10.4+`) alongside optional password authentication (`IDENTIFIED VIA unix_socket OR mysql_native_password`), ensuring headless root automation scripts never break when a password is set.
+* **Hardened Redis Cache:** Enforces `supervised systemd` and disables destructive administrative/blocking commands (`KEYS`, `MONITOR`, `CONFIG`, `SHUTDOWN`, `DEBUG`, `BGSAVE`, `SAVE`, `SLAVEOF`, `REPLICAOF`) while keeping non-blocking `SCAN` open for WordPress cache group flushing.
+* **Zero-Public-Exposure phpMyAdmin (`127.0.0.1:8080`):** Installs phpMyAdmin non-interactively without Apache bloat, binds it strictly to `127.0.0.1:8080` (`/etc/nginx/conf.d/00-bashboard-phpmyadmin.conf`) for SSH-Tunnel access only, and isolates its execution inside a dedicated `v_pma_sys` PHP-FPM pool that has zero `open_basedir` access to `/var/www/*`.
 
 ### `[2]` Virtual Host & Tenant Provisioner (`02_create_vhost.sh`)
-* **Collision-Resistant Tenant Identities:** Generates unprivileged system users with an MD5-derived 4-character suffix (`v_${name}_${hash}`) and `/usr/sbin/nologin`.
-* **Commercial Permissions Model:** Parent directory `/var/www/$DOMAIN` is locked to `750` (`$vhost_user:www-data`), blocking neighboring tenants (`Other = ---`). Web payloads are owned by `$vhost_user:$vhost_user` with `FS_METHOD = 'direct'` and `wp-config.php` restricted to `0600`.
-* **True PHP Sandboxing (`open_basedir` + `disable_functions`):** Isolates temporary files and sessions into `/var/www/$DOMAIN/tmp/` (`chmod 700`), removes global `/tmp/` from `open_basedir`, and blocks shell-execution syscalls (`exec`, `shell_exec`, `system`, `passthru`, `proc_open`, `popen`, `pcntl_exec`) via `php_admin_value` so `open_basedir` cannot be bypassed via OS binaries.
-* **Realpath Cache & Dynamic RAM Rebalancer:** Tunes `realpath_cache_size = 4096k` to offset `open_basedir` stat overhead. Dynamically calculates `pm.max_children` across all active pools after reserving 20% of host RAM (min 1536MB) for the OS and database.
-* **Zero-Mutation Webroot Let's Encrypt Engine:** Verifies public DNS resolution via a multi-tier resolver (`dig` -> IP-based DoH -> `host`) against kernel network interface IPs before requesting certificates. Uses `certbot certonly --webroot` to obtain certificates without allowing Certbot's `--nginx` plugin to mutate or corrupt virtual host files. Gracefully excludes unconfigured optional subdomains (`uploads` or `www`) rather than aborting primary domain TLS issuance.
-* **Post-TLS Loopback Pinning:** Pins `127.0.0.1` entries in `/etc/hosts` strictly *after* ACME validation completes, ensuring zero-latency internal WordPress loopback requests without interfering with pre-flight DNS checks.
+* **Collision-Resistant Hashed Identifiers:** Appends a 4-character MD5 domain hash suffix to the Linux tenant user (`v_${slug}_${hash}`), PHP-FPM pool (`${slug}_${hash}`), database name (`${slug}_${hash}`), and database user (`u_${slug}_${hash}`), eliminating truncation collisions across multi-subdomain deployments.
+* **Root-Anchored Chroot-Style Directory Hierarchy (`C1` & `C2` Hardened):**
+  * Base directory `/var/www/$DOMAIN` is owned by **`root:$vhost_user` (`0750`)** with `www-data` added to group `$vhost_user`. Because `root` owns the parent directory, a compromised tenant cannot `unlink` or tamper with `.bashboard-state` or rename the `logs/` directory.
+  * Authoritative state manifests are stored in root-restricted **`/etc/bashboard/sites/${DOMAIN}.state` (`0600`)**.
+  * Logs directory `/var/www/$DOMAIN/logs` is owned by **`www-data:$vhost_user` (`0750`)**, giving the tenant read-only access to logs while preventing `CVE-2016-1247` symlink privilege escalation during Nginx reloads or logrotate cycles.
+* **PHP-FPM Sandboxing (`open_basedir` + `disable_functions`):** Isolates temporary files and sessions into `/var/www/$DOMAIN/tmp/` (`0700`), removes global `/tmp/` from `open_basedir`, hides `expose_php`, blocks `xmlrpc.php` at the Nginx layer, and disables shell-spawning functions (`exec`, `passthru`, `shell_exec`, `system`, `proc_open`, `popen`, `pcntl_exec`, `show_source`, `highlight_file`, `proc_get_status`, `posix_*`).
+* **Catch-All Default Server & Webroot ACME TLS:** Deploys a `default_server` catch-all block (`00-bashboard-default-catchall.conf`) returning HTTP `444` to prevent unknown Host headers from hitting tenant sites. Verifies public DNS (`dig` -> IP DoH -> `host`) against kernel interface IPs and issues Let's Encrypt certificates via `certbot certonly --webroot` without mutating Nginx configuration structure. Gracefully excludes unconfigured optional subdomains (`uploads` or `www`) rather than aborting primary domain TLS issuance.
 
 ### `[3]` WordPress Site Manager (`03_wordpress_manager.sh`)
-* **Multi-PHP CLI Binary Pinning:** Reads the site's assigned `PHP_VER` from `.bashboard-state` and executes both interactive WP-CLI commands and background cron jobs using the exact matching binary (`/usr/bin/phpX.Y`), preventing version mismatch crashes on multi-PHP servers.
-* **Privilege-Dropped WP-CLI (`wp_run`):** Executes all WP-CLI operations under the tenant's Linux account (`runuser -u "$u"`) with isolated cache paths (`/var/www/$DOMAIN/tmp/wp-cache`), preventing compromised plugins from executing code as `root`.
-* **Tenant-Isolated System Crontab (5-Minute Cadence):** Automatically sets `DISABLE_WP_CRON = true` in `wp-config.php` and installs a staggered `/etc/cron.d/bashboard-wp-*` job wrapped in `flock` (`/usr/local/bin/bashboard-cron-runner`) that executes due cron events and WooCommerce Action Scheduler batches every 5 minutes.
-* **WSOD Recovery & Zero-Leak Debugging:** Deactivates broken plugins via `--skip-plugins` and toggles `WP_DEBUG_LOG = true` while enforcing `WP_DEBUG_DISPLAY = false`.
+* **Sandboxed Multi-PHP CLI & Cron Execution (`C3` Hardened):** Reads `PHP_VER` from `/etc/bashboard/sites/${DOMAIN}.state` and executes both interactive WP-CLI commands (`wp_run`) and background cron jobs (`/usr/local/bin/bashboard-cron-runner`) under the tenant user (`runuser -u`) with explicit `-d open_basedir=...` and `-d disable_functions=...` flags, ensuring CLI/Cron cannot be used by rogue plugins to bypass FPM restrictions.
+* **Symlink-Safe Permission Enforcer & Stdin Password Piping:** Executes recursive `chmod` operations under the unprivileged tenant user context to prevent root symlink race conditions, and pipes administrator passwords via `stdin` (`--prompt=user_pass`) so credentials never appear in `/proc` or `ps` process tables.
+* **Persistent Maintenance Mode:** Writes a 1-year future integer timestamp into `.maintenance` to prevent WordPress's 10-minute auto-expiration timeout and clears stale `core_updater.lock` database options upon deactivation.
+* **Direct Non-Locking Database Exports:** Uses `mariadb-dump --single-transaction --quick` directly in Option `[8]` so database backups succeed without requiring `proc_open` inside PHP-CLI.
 
 ### `[4]` DevSecOps Hardening Engine (`04_harden_security.sh`)
-* **Anti-Lockout Sudoer Sentinel:** Prohibits setting `PermitRootLogin no` unless at least one active non-root user in group `sudo` or `wheel` with a valid login shell is verified.
-* **OpenSSH Drop-in & Socket Compatibility:** Deploys `/etc/ssh/sshd_config.d/00-bashboard-hardening.conf` (first-match-wins precedence), ensures `/run/sshd` exists prior to `sshd -t` validation, and supports Ubuntu 24.04+ `ssh.socket` reloads.
-* **Journald-Aware Fail2Ban:** Automatically installs `python3-systemd` and configures `backend = systemd` on modern Debian 12 and Ubuntu 24.04+ nodes where `/var/log/auth.log` is absent.
-* **Cloud-Safe Kernel Hardening:** Configures `/etc/sysctl.d/99-bashboard-security.conf` with loose reverse-path filtering (`rp_filter = 2`), SYN flood protection, and VFS symlink/hardlink protections.
+* **Dual Anti-Lockout Sentinel:**
+  * *Gate 1:* Prohibits setting `PermitRootLogin no` unless at least one active non-root user in group `sudo` or `wheel` with a valid login shell is verified.
+  * *Gate 2:* Prohibits disabling root password login (`prohibit-password`) on fresh servers if neither a non-root sudoer user nor a root SSH public key (`/root/.ssh/authorized_keys`) exists, preventing accidental terminal lockouts.
+* **Clean UFW & Journald-Aware Fail2Ban:** Opens active SSH, HTTP (80), and HTTPS (443) ports, purges duplicate named profiles (`OpenSSH`, `Nginx Full`), installs `python3-systemd`, and configures Fail2Ban with `backend = systemd` and `banaction = ufw`.
+* **Cloud-Safe Kernel Hardening:** Applies `/etc/sysctl.d/99-bashboard-security.conf` (`rp_filter = 2`, `tcp_syncookies = 1`, `tcp_rfc1337 = 1`, ICMP redirect blocking, and VFS hardlink/symlink/FIFO protections).
 
 ### `[6]` Log Rotation Optimizer (`06_log_optimizer.sh`)
-* **Orphaned Drop-in Sanitizer & Sync:** Removes stale `/etc/logrotate.d/vhost-*` files left behind by manually deleted directories, then synchronizes active tenant logrotate policies using state-manifest user lookups.
-* **Zero-Loss Rotation & Journald Caps:** Rotates Nginx logs via `USR1` signals and PHP slowlogs via `copytruncate`. Caps `systemd-journald` disk usage (`SystemMaxUse=150M` by default) and performs immediate vacuuming.
+* **CVE-2016-1247 Safe Rotation & Orphan Sanitizer:** Purges stale `/etc/logrotate.d/vhost-*` drop-ins for deleted sites, enforces `www-data:$vhost_user` (`0750`) ownership on active log directories, rotates Nginx logs under `su www-data $vhost_user`, and caps `systemd-journald` storage (`150MB` default).
 
 ### `[7]` Virtual Host Purge Engine (`07_delete_vhost.sh`)
-* **Manifest-Driven 8-Tier Eradication:** Reads `.bashboard-state` to identify exact database and tenant user bindings. Terminates active tenant processes (`SIGTERM` -> `SIGKILL`), removes PHP-FPM pools, rebalances remaining worker limits, purges ACME certificates, sanitizes `/etc/hosts` and `/etc/cron.d/`, and validates stack health (`nginx -t` & `php-fpm -t`).
+* **Authoritative State Lookup & Exact Globbing:** Reads `/etc/bashboard/sites/${TARGET_SITE}.state`, terminates active tenant processes (`SIGTERM` -> `SIGKILL`), removes exact Let's Encrypt directory paths (preventing prefix over-matching on neighboring TLDs), drops associated databases via `MYSQL_PWD` (preventing `/proc` leaks), and validates stack health.
 
 ### `[12]` Automated Google Drive Backup Engine (`12_backup_gdrive.sh`)
-* **Dual-Tier Non-Locking Database Dumps:** Runs `mariadb-dump --single-transaction --quick --routines --triggers` via root socket authentication, falling back automatically to tenant-level `wp db export` if custom root credentials block passwordless CLI access. Verifies gzip payload size (`> 64 bytes`) to prevent uploading empty header-only archives.
-* **Headless Cron & Interactive TUI Modes:** Supports interactive configuration as well as unattended `--non-interactive` execution at 03:00 AM via `/etc/cron.d/bashboard-gdrive-backup`.
+* **Exclusive Flock & Verified State Guard:** Wraps backup execution in `/run/bashboard_backup.lock` (`flock`) to prevent overlap between manual runs and the 03:00 AM cron job. Validates tenant usernames (`^v_`) and `/etc/passwd` home directories from `/etc/bashboard/sites/*.state` before invoking any fallback commands.
+* **Anchored Tar Exclusions & Trash-Free Cloud Pruning:** Archives web payloads with anchored `--exclude="${domain}/logs"` and `--exclude="${domain}/tmp"` flags (preserving internal plugin directories) and prunes expired cloud archives only after verifying a successful upload using `--drive-use-trash=false`.
 
 ---
 
@@ -127,16 +129,21 @@ Beyond individual virtual host directories (`/var/www/$DOMAIN`), Bashboard creat
 
 | File / Directory Path | Created By | Purpose & Lifecycle |
 | :--- | :--- | :--- |
+| `/etc/bashboard/sites/*.state` | `02` / `07` | Root-owned (`0600`) authoritative state manifests for each virtual host. |
 | `/run/bashboard.lock` | `bashboard.sh` | Exclusive `flock` (FD 200) preventing concurrent dashboard sessions. |
+| `/run/bashboard_backup.lock` | `12_backup_gdrive.sh` | Exclusive `flock` (FD 201) preventing concurrent manual and cron backups. |
 | `/run/bashboard_ip` | `bashboard.sh` | Cached public IPv4 address (detected via kernel NICs first, outbound HTTP fallback). |
 | `/var/log/bashboard.log` | `bashboard.sh` | Central audit trail of module executions and exit codes. |
 | `/var/log/bashboard_lemp_install.log` | `01_install_lemp.sh` | Full APT and service provisioning output log. |
 | `/var/log/bashboard_ssl.log` | `02_create_vhost.sh` | Certbot ACME issuance and verification log. |
 | `/var/log/bashboard_backup.log` | `12_backup_gdrive.sh` | Nightly unattended Google Drive backup execution log. |
-| `/usr/local/bin/wp` | `01` / `03` | Official WP-CLI PHAR binary. |
-| `/usr/local/bin/bashboard-cron-runner` | `03_wordpress_manager.sh` | Atomic `flock` wrapper executing Multi-PHP WP-Cron and Action Scheduler tasks. |
+| `/usr/local/bin/wp` | `01` / `03` | Official WP-CLI PHAR binary (`0755`). |
+| `/usr/local/bin/bashboard-cron-runner` | `03_wordpress_manager.sh` | Sandboxed Multi-PHP `flock` wrapper executing WP-Cron and Action Scheduler tasks. |
 | `/etc/nginx/conf.d/00-cloudflare-realip.conf` | `01_install_lemp.sh` | Cloudflare IPv4/IPv6 ranges for restoring visitor IPs (`CF-Connecting-IP`). |
 | `/etc/nginx/conf.d/00-bashboard-rate-limit.conf` | `01` / `02` | Global Nginx `limit_req_zone` (`wplogin`, 10 req/min, HTTP 429). |
+| `/etc/nginx/conf.d/00-bashboard-default-catchall.conf` | `02_create_vhost.sh` | Default catch-all server block dropping unknown Host headers with HTTP `444`. |
+| `/etc/nginx/conf.d/00-bashboard-phpmyadmin.conf` | `01_install_lemp.sh` | Loopback-only (`127.0.0.1:8080`) Nginx listener for SSH-tunneled phpMyAdmin. |
+| `/etc/php/X.Y/fpm/pool.d/phpmyadmin.conf` | `01_install_lemp.sh` | Isolated PHP-FPM pool (`v_pma_sys`) for phpMyAdmin with zero `/var/www` access. |
 | `/etc/nginx/snippets/ssl-params.conf` | `01` / `02` | Hardened TLSv1.2 / TLSv1.3 cipher and session settings. |
 | `/etc/letsencrypt/renewal-hooks/deploy/bashboard-nginx-reload.sh` | `02_create_vhost.sh` | Post-renewal hook that safely reloads Nginx after automated Certbot renewals. |
 | `/etc/sysctl.d/99-bashboard-security.conf` | `04_harden_security.sh` | Kernel network and VFS security parameters. |
@@ -176,7 +183,24 @@ chown -R root:root /opt/bashboard
 
 ## ⚙️ Operator Configuration Guides
 
-### 1. Google Drive Off-Site Backup Setup (`rclone`)
+### 1. Accessing Sandboxed phpMyAdmin via SSH Tunnel (`127.0.0.1:8080`)
+
+When installed via Module **`[1]`**, phpMyAdmin is bound strictly to `127.0.0.1:8080` and runs under an isolated system account (`v_pma_sys`). It is completely invisible to the public internet.
+
+To access phpMyAdmin from your local workstation:
+1. Open a terminal on your **local laptop** and establish an SSH port-forwarding tunnel to your server:
+   ```bash
+   ssh -L 8081:127.0.0.1:8080 your_ssh_user@YOUR_SERVER_IP
+   ```
+2. Keep that terminal window open and navigate to the following URL in your local web browser:
+   ```text
+   http://localhost:8081
+   ```
+3. Log in using any site's isolated database credentials (displayed at the end of Module `[2]` or stored in `/etc/bashboard/sites/<domain>.state`) or your MariaDB administrative user.
+
+---
+
+### 2. Google Drive Off-Site Backup Setup (`rclone`)
 
 Bashboard uses `rclone` to stream backups to Google Drive. Because a Linux VPS has no local web browser, authorization is performed headlessly.
 
@@ -219,7 +243,7 @@ The server terminal will now pause at `config_token>` and ask you to run `rclone
 * **Method B: SSH Port Forwarding (No local `rclone` installation required)**
   1. Open a second terminal on your laptop and connect to the VPS with port `53682` forwarded:
      ```bash
-     ssh -L 53682:127.0.0.1:53682 root@YOUR_SERVER_IP
+     ssh -L 53682:127.0.0.1:53682 your_ssh_user@YOUR_SERVER_IP
      ```
   2. If using this tunnel during Step 2 (Question 10), you can answer **`y`** instead of `n` and open the generated `http://127.0.0.1:53682/auth?...` link directly in your laptop's browser.
 
@@ -246,7 +270,7 @@ Once verified, launch `./bashboard.sh`, select **`[12]`**, press **`[9]`** to ru
 
 ---
 
-### 2. Configuring the Static Media Subdomain (`uploads.domain.com`)
+### 3. Configuring the Static Media Subdomain (`uploads.domain.com`)
 
 When deploying a Virtual Host in Module **`[2]`**, toggling Option **`[4] Uploads Subdomain`** to `ENABLED` provisions:
 1. A dedicated directory at `/var/www/example.com/public_html/uploads`.
@@ -264,7 +288,7 @@ Because Bashboard does not hardcode media URLs into your database automatically,
 
 ---
 
-### 3. Cloudflare & DNS Pre-Flight Considerations
+### 4. Cloudflare & DNS Pre-Flight Considerations
 
 Module **`[2]`** performs a strict Pre-Flight DNS check against public resolvers (`1.1.1.1`, `8.8.8.8`, `9.9.9.9`) before invoking Let's Encrypt:
 * When provisioning a **new site**, set your domain's `A` record (`@`) and `www` record in Cloudflare to **DNS Only (Grey Cloud)** so the public DNS resolves directly to your VPS IPv4 address.
@@ -277,7 +301,7 @@ Module **`[2]`** performs a strict Pre-Flight DNS check against public resolvers
 When configuring a brand-new production node, follow this sequence:
 
 ```text
-[Step 1] Option [1]  -> Provision LEMP Stack (Nginx, MariaDB, PHP-FPM, Redis, WP-CLI)
+[Step 1] Option [1]  -> Provision LEMP Stack (Nginx, MariaDB, PHP-FPM, Redis, WP-CLI, phpMyAdmin)
 [Step 2] Option [4]  -> Enforce Security Hardening (UFW Firewall, Fail2Ban, Sysctl, SSH)
 [Step 3] Option [2]  -> Deploy Virtual Host (Select WordPress or Blank, Isolated Tenant, TLS)
 [Step 4] Option [3]  -> WordPress Manager (Toggle System 5m WP-Cron, Verify Checksums)
@@ -291,18 +315,24 @@ When configuring a brand-new production node, follow this sequence:
 
 Verify your server's runtime health and security isolation using these commands:
 
-### 1. Verify Multi-Tenant POSIX Isolation (Lateral Movement Test)
-Simulate a compromised tenant shell on Site B attempting to read Site A's configuration:
+### 1. Verify Multi-Tenant POSIX Isolation & Root-Anchored Parent (`C1` & `C2` Test)
 ```bash
-# Attempt to read Site A's database credentials as Site B's isolated user:
-sudo -u v_site_b_xxxx cat /var/www/site-a.com/public_html/wp-config.php
+# 1. Verify parent directory is owned by root:$vhost_user (0750) and logs by www-data:$vhost_user (0750):
+ls -ld /var/www/example.com /var/www/example.com/logs
+# Must show:
+# drwxr-x--- 5 root     v_example_com_xxxx 4096 ... /var/www/example.com
+# drwxr-x--- 2 www-data v_example_com_xxxx 4096 ... /var/www/example.com/logs
 
-# Expected Output:
-# cat: /var/www/site-a.com/public_html/wp-config.php: Permission denied
+# 2. Verify tenant cannot unlink root-anchored state file:
+sudo -u v_example_com_xxxx rm -f /var/www/example.com/.bashboard-state
+# Expected Output: rm: cannot remove '.../.bashboard-state': Permission denied
+
+# 3. Verify Site B cannot read Site A's wp-config.php:
+sudo -u v_site_b_yyyy cat /var/www/site-a.com/public_html/wp-config.php
+# Expected Output: cat: .../wp-config.php: Permission denied
 ```
 
-### 2. Verify `open_basedir` & Syscall Lockdown
-Verify that PHP blocks reading system files and blocks shell execution functions:
+### 2. Verify `open_basedir` & Function Lockdown (`C3` Test)
 ```bash
 # 1. Test open_basedir restriction:
 sudo -u v_example_com_xxxx php -d open_basedir="/var/www/example.com/:/dev/urandom" \
@@ -310,48 +340,27 @@ sudo -u v_example_com_xxxx php -d open_basedir="/var/www/example.com/:/dev/urand
 # Expected Output: BLOCKED
 
 # 2. Inspect disabled functions in the tenant's pool configuration:
-grep "disable_functions" /etc/php/*/fpm/pool.d/example_com.conf
+grep "disable_functions" /etc/php/*/fpm/pool.d/example_com_*.conf
 ```
 
-### 3. Verify Cross-Tenant Temporary & Session Sandboxing
+### 3. Verify Zero-Trust Upload Sandboxing & XML-RPC Block
 ```bash
-# Verify that the tenant's temp sandbox is locked down to mode 700:
-ls -ld /var/www/example.com/tmp
-# Must show: drwx------ v_example_com_xxxx v_example_com_xxxx
-```
-
-### 4. Verify One-Click WordPress Dashboard Permissions
-```bash
-# Parent directory must be 750 (tenant:www-data), wp-config.php must be 600:
-ls -ld /var/www/example.com
-# Must show: drwxr-x--- v_example_com_xxxx www-data
-
-ls -l /var/www/example.com/public_html/wp-config.php
-# Must show: -rw------- 1 v_example_com_xxxx v_example_com_xxxx
-```
-
-### 5. Verify Zero-Trust Upload Sandboxing
-```bash
-# Create a dummy PHP file inside the uploads directory
+# 1. Create a dummy PHP file inside the uploads directory
 echo "<?php phpinfo(); ?>" > /var/www/example.com/public_html/wp-content/uploads/test.php
 
-# Request via curl (Must return 403 Forbidden or 404 Not Found, NEVER 200 OK)
+# 2. Request via curl (Must return 403 Forbidden or 404 Not Found, NEVER 200 OK)
 curl -k -I https://example.com/wp-content/uploads/test.php
-
-# Clean up test file
 rm -f /var/www/example.com/public_html/wp-content/uploads/test.php
+
+# 3. Verify XML-RPC is blocked with 403 Forbidden:
+curl -k -I https://example.com/xmlrpc.php
 ```
 
-### 6. Verify Tenant-Isolated WP-Cron Offloading
+### 4. Verify Sandboxed WP-Cron Offloading
 ```bash
-# Inspect the active system cron drop-in:
+# Inspect the active system cron drop-in and runner:
 cat /etc/cron.d/bashboard-wp-*
-
-# Test manual cron execution strictly under the tenant's sandboxed environment:
-sudo -u v_example_com_xxxx \
-  HOME=/var/www/example.com \
-  WP_CLI_CACHE_DIR=/var/www/example.com/tmp/wp-cache \
-  php /usr/local/bin/wp cron event list --path=/var/www/example.com/public_html
+cat /usr/local/bin/bashboard-cron-runner
 ```
 
 ---
@@ -372,7 +381,7 @@ sudo -u v_example_com_xxxx \
   ```bash
   sudo certbot certonly --webroot -w /var/www/example.com/public_html \
     --cert-name example.com --non-interactive --agree-tos \
-    --email admin@example.com --no-eff-email \
+    --register-unsafely-without-email \
     -d example.com -d www.example.com && \
   sudo sed -i "s|/etc/nginx/ssl/example.com.crt|/etc/letsencrypt/live/example.com/fullchain.pem|g" /etc/nginx/sites-available/example.com && \
   sudo sed -i "s|/etc/nginx/ssl/example.com.key|/etc/letsencrypt/live/example.com/privkey.pem|g" /etc/nginx/sites-available/example.com && \
@@ -387,7 +396,7 @@ If Nginx responds with `502 Bad Gateway`, inspect the dedicated error log and so
 tail -n 20 /var/www/example.com/logs/nginx_error.log
 
 # 2. Verify that the dedicated PHP-FPM socket exists
-ls -la /run/php/php*-fpm-example_com.sock
+ls -la /run/php/php*-fpm-example_com_*.sock
 # Must show: srw-rw---- 1 www-data www-data
 
 # 3. Validate PHP-FPM pool syntax across all installed versions
@@ -398,7 +407,7 @@ for fpm in /usr/sbin/php-fpm*; do "$fpm" -t; done
 If a faulty plugin update crashes a WordPress site:
 1. Launch `./bashboard.sh` -> Select **`[3] WordPress Manager`** -> Choose the target domain.
 2. Select **`[6] 🚨 Deactivate ALL Plugins (WSOD Fix)`**.
-3. Bashboard executes `wp plugin deactivate --all --skip-plugins` as the tenant user, bypassing broken plugin code and restoring site availability immediately.
+3. Bashboard executes `wp plugin deactivate --all --skip-plugins` inside the tenant sandbox, bypassing broken plugin code and restoring site availability immediately.
 
 ---
 

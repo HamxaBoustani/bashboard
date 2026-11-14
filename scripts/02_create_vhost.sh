@@ -953,9 +953,9 @@ CREATED_AT=$(date -u +%s)
 EOF
 chown root:root "/etc/bashboard/sites/${DOMAIN}.state"
 chmod 600 "/etc/bashboard/sites/${DOMAIN}.state"
-cp -f "/etc/bashboard/sites/${DOMAIN}.state" "/var/www/$DOMAIN/.bashboard-state"
-chown root:root "/var/www/$DOMAIN/.bashboard-state"
-chmod 600 "/var/www/$DOMAIN/.bashboard-state"
+# cp -f "/etc/bashboard/sites/${DOMAIN}.state" "/var/www/$DOMAIN/.bashboard-state"
+# chown root:root "/var/www/$DOMAIN/.bashboard-state"
+# chmod 600 "/var/www/$DOMAIN/.bashboard-state"
 
 # ------------------------------------------------------------------------------
 # 12. LET'S ENCRYPT AUTOMATION ENGINE (Interface-First IP & Graceful Subdomains)
